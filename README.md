@@ -94,5 +94,6 @@ Known action invocation example:
 - SelfMax selectors are configurable via env vars because the DOM may change.
 - Current state persistence is implemented with `window.localStorage` inside the authenticated SelfMax session context.
 - For production durability, replace storage primitives with explicit SelfMax UI actions that write/read from a durable in-app entity (notes/journal/custom field).
-- A first-pass state/action inventory is documented in `docs/state-action-catalog.md` and mapped to stable `actionId` values.
-- Flow-level static/dynamic UI copy inventory for OpenClaw prompting is documented in `docs/selfmax-ui-text-inventory.md`.
+- Canonical route/state/action definitions are documented in `docs/selfmax-route-state-action-spec.md`.
+- Canonical guidance language inventory is documented in `docs/selfmax-guidance-copy-inventory.md`.
+- Canonical integration runtime flow is documented in `docs/selfmax-technical-integration-flow.md`.

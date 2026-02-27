@@ -754,8 +754,8 @@ Suggested envelope fields:
 
 ## 8b) UI Text Prompt Inventory
 
-- Static/dynamic copy used by OpenClaw guidance is documented in `docs/selfmax-ui-text-inventory.md`.
-- OpenClaw should use `prompt_id` references from that inventory to ask user questions consistently across routes.
+- Guidance language used by OpenClaw is documented in `docs/selfmax-guidance-copy-inventory.md`.
+- Use that consolidated inventory as the canonical source for high-value instructional and reflective copy.
 
 ## 9) Open Questions to Resolve in Live DOM Pass
 
