@@ -262,6 +262,27 @@ async function runClientMode(args) {
       return;
     }
 
+    if (args.mode === "read-task-panel-snapshot") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute(
+        {
+          id: "read-task-panel-snapshot",
+          name: "read_task_panel_snapshot",
+          payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" }
+        },
+        session
+      );
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "survey-active-goal-task-states") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "survey-active-goal-task-states", name: "survey_active_goal_task_states" }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
     if (args.mode === "read-lifestorming-overview") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "read-lifestorming-overview", name: "read_lifestorming_overview" }, session);

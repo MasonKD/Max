@@ -32,6 +32,8 @@ This project provides a Playwright-driven integration layer so OpenClaw/Moltbot 
   - `read_goal_full`
   - `read_cached_goals`
   - `read_cached_desires`
+  - `read_task_panel_snapshot`
+  - `survey_active_goal_task_states`
   - `list_goal_tasks`
   - `read_goal_chat`
   - `read_lifestorming_overview`
@@ -107,6 +109,8 @@ node scripts/selfmax-smoke.mjs read-goal-workspace --goal-id <id>
 node scripts/selfmax-smoke.mjs read-goal-full --goal-id <id>
 node scripts/selfmax-smoke.mjs read-cached-goals
 node scripts/selfmax-smoke.mjs read-cached-desires
+node scripts/selfmax-smoke.mjs read-task-panel-snapshot --goal-id <id>
+node scripts/selfmax-smoke.mjs survey-active-goal-task-states
 node scripts/selfmax-smoke.mjs read-tasks --goal-id <id>
 node scripts/selfmax-smoke.mjs read-goal-chat --goal-id <id>
 node scripts/selfmax-smoke.mjs read-lifestorming-overview

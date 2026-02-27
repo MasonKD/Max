@@ -26,6 +26,8 @@ export type PrimitiveName =
   | "read_goal_full"
   | "read_cached_goals"
   | "read_cached_desires"
+  | "read_task_panel_snapshot"
+  | "survey_active_goal_task_states"
   | "list_goal_tasks"
   | "read_goal_chat"
   | "read_lifestorming_overview"

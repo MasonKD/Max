@@ -23,6 +23,9 @@ type SessionEntityCache = {
       category?: string;
       dueLabel?: string;
       progressLabel?: string;
+      taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+      taskSummaryLabel?: string;
+      taskPreviewItems?: string[];
       lastSeenAt: string;
     }
   >;
@@ -123,6 +126,10 @@ export class SelfMaxPlaywrightClient {
             return this.readCachedGoals();
           case "read_cached_desires":
             return this.readCachedDesires();
+          case "read_task_panel_snapshot":
+            return this.readTaskPanelSnapshot(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
+          case "survey_active_goal_task_states":
+            return this.surveyActiveGoalTaskStates();
           case "list_goal_tasks":
             return this.listGoalTasks(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
           case "read_goal_chat":
@@ -142,15 +149,28 @@ export class SelfMaxPlaywrightClient {
           case "add_tasks":
             return this.addTasks(
               this.asOptionalString(req.payload?.goalTitle),
+              this.asOptionalString(req.payload?.goalId),
               ((req.payload?.tasks as unknown[]) ?? []).map((v) => String(v)),
               Boolean(req.payload?.useSuggestions)
             );
           case "remove_task":
-            return this.removeTask(this.asOptionalString(req.payload?.goalTitle), String(req.payload?.taskText ?? ""));
+            return this.removeTask(
+              this.asOptionalString(req.payload?.goalTitle),
+              this.asOptionalString(req.payload?.goalId),
+              String(req.payload?.taskText ?? "")
+            );
           case "complete_task":
-            return this.completeTask(this.asOptionalString(req.payload?.goalTitle), String(req.payload?.taskText ?? ""));
+            return this.completeTask(
+              this.asOptionalString(req.payload?.goalTitle),
+              this.asOptionalString(req.payload?.goalId),
+              String(req.payload?.taskText ?? "")
+            );
           case "uncomplete_task":
-            return this.uncompleteTask(this.asOptionalString(req.payload?.goalTitle), String(req.payload?.taskText ?? ""));
+            return this.uncompleteTask(
+              this.asOptionalString(req.payload?.goalTitle),
+              this.asOptionalString(req.payload?.goalId),
+              String(req.payload?.taskText ?? "")
+            );
           case "complete_goal":
             return this.completeGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
           case "archive_goal":
@@ -805,7 +825,16 @@ export class SelfMaxPlaywrightClient {
   private async listGoals(filter: string): Promise<{
     filter: string;
     auth: { valid: boolean; archivedCount: number | null; activeCount: number | null; completeCount: number | null; allCount: number | null };
-    goals: Array<{ title: string; goalId?: string; category?: string; dueLabel?: string; progressLabel?: string }>;
+    goals: Array<{
+      title: string;
+      goalId?: string;
+      category?: string;
+      dueLabel?: string;
+      progressLabel?: string;
+      taskSummaryLabel?: string;
+      taskPreviewItems?: string[];
+      taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+    }>;
   }> {
     const page = this.pageOrThrow();
     await this.ensureOnGoals();
@@ -824,7 +853,16 @@ export class SelfMaxPlaywrightClient {
 
     const goals = await page.evaluate(() => {
       const rows = Array.from(document.querySelectorAll("article, section, li, div"));
-      const extracted: Array<{ title: string; goalId?: string; category?: string; dueLabel?: string; progressLabel?: string }> = [];
+      const extracted: Array<{
+        title: string;
+        goalId?: string;
+        category?: string;
+        dueLabel?: string;
+        progressLabel?: string;
+        taskSummaryLabel?: string;
+        taskPreviewItems?: string[];
+        taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+      }> = [];
       const categories = ["health", "work", "love", "family", "social", "fun", "dreams", "meaning"];
 
       for (const row of rows) {
@@ -850,10 +888,42 @@ export class SelfMaxPlaywrightClient {
         const category = lines.find((line) => categories.includes(line.toLowerCase()));
         const dueLabel = lines.find((line) => /^Due\s/i.test(line));
         const progressLabel = lines.find((line) => /tasks completed|\d+%/i.test(line));
-        extracted.push({ title, goalId: idMatch?.[1], category, dueLabel, progressLabel });
+        const summaryIndex = lines.findIndex((line) => /tasks completed|No tasks/i.test(line));
+        const taskSummaryLabel = summaryIndex !== -1 ? lines[summaryIndex] : undefined;
+        const taskPreviewItems = lines
+          .filter(
+            (line) =>
+              line !== title &&
+              line !== category &&
+              line !== dueLabel &&
+              line !== progressLabel &&
+              line !== taskSummaryLabel &&
+              !/^(START|ADD TASKS)$/i.test(line) &&
+              line.length > 0
+          )
+          .slice(0, 12);
+        const taskPanelState =
+          taskSummaryLabel && /tasks completed/i.test(taskSummaryLabel)
+            ? "tasks_present"
+            : /No tasks/i.test(taskSummaryLabel ?? "") || lines.some((line) => /^ADD TASKS$/i.test(line))
+              ? "add_tasks"
+              : "empty";
+        extracted.push({ title, goalId: idMatch?.[1], category, dueLabel, progressLabel, taskSummaryLabel, taskPreviewItems, taskPanelState });
       }
 
-      const dedup = new Map<string, { title: string; goalId?: string; category?: string; dueLabel?: string; progressLabel?: string }>();
+      const dedup = new Map<
+        string,
+        {
+          title: string;
+          goalId?: string;
+          category?: string;
+          dueLabel?: string;
+          progressLabel?: string;
+          taskSummaryLabel?: string;
+          taskPreviewItems?: string[];
+          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+        }
+      >();
       for (const item of extracted) {
         if (!dedup.has(item.title)) {
           dedup.set(item.title, item);
@@ -862,13 +932,19 @@ export class SelfMaxPlaywrightClient {
       return [...dedup.values()];
     });
 
-    let extractedGoals = goals;
-    if (extractedGoals.length === 0) {
-      extractedGoals = await page.evaluate(() => {
+    const summaryGoals = await page.evaluate(() => {
         const lines = (document.body.innerText || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
         const filters = new Set(["Active", "Complete", "Archived", "All"]);
         const categories = new Set(["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"]);
-        const out: Array<{ title: string; category?: string; dueLabel?: string; progressLabel?: string }> = [];
+        const out: Array<{
+          title: string;
+          category?: string;
+          dueLabel?: string;
+          progressLabel?: string;
+          taskSummaryLabel?: string;
+          taskPreviewItems?: string[];
+          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+        }> = [];
         let inGoals = false;
 
         for (let i = 0; i < lines.length; i += 1) {
@@ -888,21 +964,82 @@ export class SelfMaxPlaywrightClient {
           const next2 = lines[i + 2] ?? "";
           const next3 = lines[i + 3] ?? "";
           if (categories.has(next) && /^Due\s/i.test(next2)) {
+            const tail = lines.slice(i + 4, i + 20);
+            const startIdx = tail.findIndex((line) => /^START$/i.test(line));
+            const segment = startIdx === -1 ? tail : tail.slice(0, startIdx);
+            const taskSummaryLabel = segment.find((line) => /tasks completed|No tasks/i.test(line));
+            const taskPreviewItems = segment.filter(
+              (line) =>
+                line !== taskSummaryLabel &&
+                !/^\d+%$/i.test(line) &&
+                !/^ADD TASKS$/i.test(line) &&
+                line.length > 0
+            );
+            const taskPanelState =
+              taskSummaryLabel && /tasks completed/i.test(taskSummaryLabel)
+                ? "tasks_present"
+                : segment.some((line) => /^ADD TASKS$/i.test(line))
+                  ? "add_tasks"
+                  : "empty";
             out.push({
               title: line,
               category: next,
               dueLabel: next2,
-              progressLabel: /%|tasks completed/i.test(next3) ? next3 : undefined
+              progressLabel: /%|tasks completed/i.test(next3) ? next3 : undefined,
+              taskSummaryLabel,
+              taskPreviewItems: taskPreviewItems.slice(0, 12),
+              taskPanelState
             });
           }
         }
 
-        const dedup = new Map<string, { title: string; category?: string; dueLabel?: string; progressLabel?: string }>();
+        const dedup = new Map<
+          string,
+          {
+            title: string;
+            category?: string;
+            dueLabel?: string;
+            progressLabel?: string;
+            taskSummaryLabel?: string;
+            taskPreviewItems?: string[];
+            taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+          }
+        >();
         for (const item of out) {
           if (!dedup.has(item.title)) dedup.set(item.title, item);
         }
         return [...dedup.values()];
       });
+
+    let extractedGoals = goals;
+    if (summaryGoals.length > 0) {
+      const merged = new Map<
+        string,
+        {
+          title: string;
+          goalId?: string;
+          category?: string;
+          dueLabel?: string;
+          progressLabel?: string;
+          taskSummaryLabel?: string;
+          taskPreviewItems?: string[];
+          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+        }
+      >();
+      for (const item of goals) {
+        merged.set(item.title, item);
+      }
+      for (const summary of summaryGoals) {
+        const existing = merged.get(summary.title);
+        merged.set(summary.title, {
+          ...existing,
+          ...summary,
+          goalId: existing?.goalId
+        });
+      }
+      extractedGoals = [...merged.values()];
+    } else if (extractedGoals.length === 0) {
+      extractedGoals = summaryGoals;
     }
 
     for (const goal of extractedGoals) {
@@ -912,12 +1049,84 @@ export class SelfMaxPlaywrightClient {
           title: goal.title,
           category: goal.category,
           dueLabel: goal.dueLabel,
-          progressLabel: goal.progressLabel
+          progressLabel: goal.progressLabel,
+          taskPanelState: goal.taskPanelState,
+          taskSummaryLabel: goal.taskSummaryLabel,
+          taskPreviewItems: goal.taskPreviewItems
         });
       }
     }
 
     return { filter: normalized, auth, goals: extractedGoals };
+  }
+
+  private async surveyActiveGoalTaskStates(): Promise<{
+    goals: Array<{
+      title: string;
+      goalId?: string;
+      category?: string;
+      progressLabel?: string;
+      taskSummaryLabel?: string;
+      taskPreviewItems?: string[];
+      taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+    }>;
+    counts: { tasks_present: number; add_tasks: number; empty: number };
+  }> {
+    const listed = await this.listGoals("active");
+    const goals = listed.goals.map((goal) => ({
+      title: goal.title,
+      goalId: goal.goalId,
+      category: goal.category,
+      progressLabel: goal.progressLabel,
+      taskSummaryLabel: goal.taskSummaryLabel,
+      taskPreviewItems: goal.taskPreviewItems,
+      taskPanelState: goal.taskPanelState ?? "empty"
+    }));
+    const counts = { tasks_present: 0, add_tasks: 0, empty: 0 };
+    for (const goal of goals) {
+      counts[goal.taskPanelState] += 1;
+    }
+    return { goals, counts };
+  }
+
+  private async getGoalTaskSummary(
+    goalTitle?: string,
+    goalId?: string
+  ): Promise<
+    | {
+        goalId?: string;
+        title: string;
+        taskPanelState: "tasks_present" | "add_tasks" | "empty";
+        taskSummaryLabel?: string;
+        taskPreviewItems?: string[];
+      }
+    | null
+  > {
+    if (goalId) {
+      const cached = this.entityCache.goalsById[goalId];
+      if (cached?.taskPanelState) {
+        return {
+          goalId,
+          title: cached.title ?? goalTitle ?? goalId,
+          taskPanelState: cached.taskPanelState,
+          taskSummaryLabel: cached.taskSummaryLabel,
+          taskPreviewItems: cached.taskPreviewItems
+        };
+      }
+    }
+
+    const listed = await this.listGoals("active");
+    const match = listed.goals.find((goal) => (goalId && goal.goalId === goalId) || (goalTitle && goal.title === goalTitle));
+    if (!match) {
+      return null;
+    }
+    return {
+      goalId: match.goalId,
+      title: match.title,
+      taskPanelState: match.taskPanelState ?? "empty",
+      taskSummaryLabel: match.taskSummaryLabel,
+      taskPreviewItems: match.taskPreviewItems
+    };
   }
 
   private async discoverGoalIds(waitMs?: unknown): Promise<{ goalIds: string[]; waitMs: number; loadingVisible: boolean }> {
@@ -1225,6 +1434,53 @@ export class SelfMaxPlaywrightClient {
     };
   }
 
+  private async readTaskPanelSnapshot(
+    goalTitle?: string,
+    goalId?: string
+  ): Promise<{
+    goalId?: string;
+    goalTitle?: string;
+    url: string;
+    taskPanelVisible: boolean;
+    taskPanelText?: string;
+    nearbyTexts: string[];
+    nearbyHtml: string[];
+    snippet: string;
+  }> {
+    await this.openGoalForRead(goalTitle, goalId);
+    const page = this.pageOrThrow();
+    await this.openTaskPanel();
+    const panel = await this.resolveTaskPanel();
+    const taskPanelVisible = Boolean(panel && (await panel.count()) > 0);
+    const result = await page.evaluate(() => {
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
+        /TASKS|Add new task|Use the task suggestion tool|How will you accomplish|Select Tasks/i.test(
+          normalize((el as HTMLElement).innerText || el.textContent || "")
+        )
+      );
+      return {
+        nearbyTexts: candidates
+          .slice(0, 20)
+          .map((el) => normalize((el as HTMLElement).innerText || el.textContent || ""))
+          .filter(Boolean),
+        nearbyHtml: candidates.slice(0, 10).map((el) => (el as HTMLElement).outerHTML.slice(0, 600)),
+        snippet: normalize(document.body.innerText || "").slice(0, 1200)
+      };
+    });
+
+    return {
+      goalId: goalId ?? this.goalIdFromUrl(page.url()),
+      goalTitle,
+      url: page.url(),
+      taskPanelVisible,
+      taskPanelText: panel ? ((await panel.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || undefined) : undefined,
+      nearbyTexts: result.nearbyTexts,
+      nearbyHtml: result.nearbyHtml,
+      snippet: result.snippet
+    };
+  }
+
   private async readGoalWorkspace(
     goalTitle?: string,
     goalId?: string
@@ -1275,9 +1531,32 @@ export class SelfMaxPlaywrightClient {
     snippet?: string;
     tasks: Array<{ text: string; completed: boolean }>;
   }> {
+    const summary = await this.getGoalTaskSummary(goalTitle, goalId);
+    if (summary?.taskPanelState === "add_tasks") {
+      return {
+        goalId: goalId ?? summary.goalId,
+        goalTitle: goalTitle ?? summary.title,
+        url: this.pageOrThrow().url(),
+        workspaceVisible: false,
+        reason: summary.taskSummaryLabel ?? "No tasks",
+        snippet: await this.readBodySnippet().catch(() => ""),
+        tasks: []
+      };
+    }
+    if (summary?.taskPanelState === "tasks_present" && (summary.taskPreviewItems?.length ?? 0) > 0) {
+      return {
+        goalId: goalId ?? summary.goalId,
+        goalTitle: goalTitle ?? summary.title,
+        url: this.pageOrThrow().url(),
+        workspaceVisible: false,
+        reason: summary.taskSummaryLabel,
+        snippet: await this.readBodySnippet().catch(() => ""),
+        tasks: summary.taskPreviewItems!.map((text) => ({ text, completed: false }))
+      };
+    }
+
     await this.openGoalForRead(goalTitle, goalId);
     const page = this.pageOrThrow();
-    const taskPanelVisibleBefore = await this.isTaskPanelVisible();
     try {
       await this.ensureOnGoalTaskContext(undefined);
     } catch (error) {
@@ -1292,7 +1571,7 @@ export class SelfMaxPlaywrightClient {
       };
     }
 
-    const taskPanelVisible = taskPanelVisibleBefore || (await this.isTaskPanelVisible());
+    const taskPanelVisible = await this.isTaskPanelVisible();
     if (!taskPanelVisible) {
       return {
         goalId: goalId ?? this.goalIdFromUrl(page.url()),
@@ -1307,12 +1586,17 @@ export class SelfMaxPlaywrightClient {
 
     const tasks = await page.evaluate(() => {
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
-      const noise = /^(Add new task|Use the task suggestion tool|Select Tasks|Cancel|Set Tasks|Type your message|⌘ \+ Enter to send)$/i;
+      const noise = /^(Add new task|Use the task suggestion tool|Select Tasks|Cancel|Set Tasks|Type your message|⌘ \+ Enter to send|TASKS)$/i;
       const taskLike = (text: string): boolean =>
         /\b(research|discuss|reach out|plan|schedule|call|book|create|begin|talk|choose|review|write|set up|find|contact)\b/i.test(text) ||
         text.length > 18;
 
       const out: Array<{ text: string; completed: boolean }> = [];
+      const panelAnchor = Array.from(document.querySelectorAll("body *")).find((el) =>
+        /How will you accomplish|Select Tasks|Add new task|Use the task suggestion tool/i.test(normalize((el as HTMLElement).innerText || el.textContent || ""))
+      );
+      const panelRoot = panelAnchor?.closest("section,article,div") ?? panelAnchor?.parentElement ?? null;
+
       const collectFromScope = (root: ParentNode): void => {
         for (const row of Array.from(root.querySelectorAll("li, article, section, div"))) {
           const raw = normalize((row as HTMLElement).innerText || row.textContent || "");
@@ -1328,12 +1612,8 @@ export class SelfMaxPlaywrightClient {
         }
       };
 
-      const anchors = Array.from(document.querySelectorAll("body *")).filter((el) =>
-        /How will you accomplish|Select Tasks|Add new task|Use the task suggestion tool/i.test(normalize((el as HTMLElement).innerText || el.textContent || ""))
-      );
-      for (const anchor of anchors) {
-        const panel = anchor.closest("section,article,div") ?? anchor.parentElement ?? document.body;
-        collectFromScope(panel);
+      if (panelRoot) {
+        collectFromScope(panelRoot);
       }
 
       const lines = (document.body.innerText || "").split(/\n+/).map(normalize).filter(Boolean);
@@ -1427,6 +1707,7 @@ export class SelfMaxPlaywrightClient {
     url: string;
     stepTexts: string[];
     visibleDesires: string[];
+    desiresBySection: Array<{ section: "feel_it_out" | "start_a_goal"; items: string[] }>;
     snippet: string;
   }> {
     const page = this.pageOrThrow();
@@ -1444,12 +1725,52 @@ export class SelfMaxPlaywrightClient {
             line
           )
       ).slice(0, 20);
+
+      const extractSectionItems = (headingPattern: RegExp, stopPattern: RegExp): string[] => {
+        const start = lines.findIndex((line) => headingPattern.test(line));
+        if (start === -1) return [];
+        const items: string[] = [];
+        for (let i = start + 1; i < lines.length; i += 1) {
+          const line = lines[i];
+          if (stopPattern.test(line)) break;
+          if (
+            /^GO$|^VIEW$|^ADD TO GOALS$|^BEGIN$|^No desires to practice yet\.?$|^No desires selected for final selection yet\.?$/i.test(line) ||
+            /Now that you have a list of DESIRES|How would it feel\?|Spend a few minutes on your DESIRES|Or, you can delete it|Now you know how you feel!/i.test(line)
+          ) {
+            continue;
+          }
+          if (
+            line.length > 1 &&
+            !/^STEP\s+\d+/i.test(line) &&
+            !/^LIFESTORMING$|^BRAINSTORM$|^YOUR LIFE$/i.test(line)
+          ) {
+            items.push(line);
+          }
+        }
+        return [...new Set(items)];
+      };
+
+      const feelItOut = extractSectionItems(/^STEP 2:\s*FEEL IT OUT$/i, /^STEP 3:\s*START A GOAL$/i);
+      const startGoal = extractSectionItems(/^STEP 3:\s*START A GOAL$/i, /^Self-Max is an AI-driven/i);
       return {
         stepTexts,
         visibleDesires,
+        desiresBySection: [
+          { section: "feel_it_out" as const, items: feelItOut },
+          { section: "start_a_goal" as const, items: startGoal }
+        ],
         snippet: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 800)
       };
     });
+
+    for (const section of result.desiresBySection) {
+      for (const title of section.items) {
+        const existingId = this.findDesireIdByTitle(title);
+        if (existingId) {
+          this.cacheDesire({ desireId: existingId, title });
+        }
+      }
+    }
 
     return { url: page.url(), ...result };
   }
@@ -1459,65 +1780,15 @@ export class SelfMaxPlaywrightClient {
     buckets: Array<{ category: string; items: string[] }>;
     snippet: string;
   }> {
-    const page = this.pageOrThrow();
-    const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-    const categories = ["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"];
-    const buckets: Array<{ category: string; items: string[] }> = [];
-
-    await page.goto(`${base}/lifestorming/desires-selection/category`, { waitUntil: "domcontentloaded" });
-    await this.waitForPageTextNotContaining("Loading Desires...", 8000);
-    for (const category of categories) {
-      await page.goto(`${base}/lifestorming/desires-selection/${category.toLowerCase()}`, { waitUntil: "domcontentloaded" });
-      await this.waitForDesiresCategory(category);
-      const items = await page.evaluate((activeCategory) => {
-        const categories = ["HEALTH", "WORK", "LOVE", "FAMILY", "SOCIAL", "FUN", "DREAMS", "MEANING"];
-        const lines = (document.body.innerText || "").split(/\n+/).map((v) => v.trim()).filter(Boolean);
-        const anchors = Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
-          const href = (el as HTMLAnchorElement).href || "";
-          const match = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
-          return { text: (el.textContent || "").trim(), desireId: match?.[1] };
-        });
-        const idx = lines.findIndex((line) => line.toLowerCase() === activeCategory.toLowerCase());
-        if (idx === -1) return [];
-        const out: Array<{ title: string; desireId?: string }> = [];
-        for (let i = idx + 1; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (
-            /NEXT STEP|Add an item|^Add$|No items in this bucket yet|Spend a few minutes|Think of something|Click on a category|LIFESTORMING STEP/i.test(
-              line
-            )
-          ) {
-            continue;
-          }
-          if (categories.includes(line.toUpperCase())) {
-            break;
-          }
-          if (/^[A-Z ]+$/.test(line) && line.length <= 20) {
-            continue;
-          }
-          if (line.length > 1) {
-            const linked = anchors.find((anchor) => anchor.text === line);
-            out.push({ title: line, desireId: linked?.desireId });
-          }
-        }
-        const dedup = new Map<string, { title: string; desireId?: string }>();
-        for (const item of out) {
-          if (!dedup.has(item.title)) dedup.set(item.title, item);
-        }
-        return [...dedup.values()];
-      }, category);
-      for (const item of items) {
-        if (item.desireId) {
-          this.cacheDesire({ desireId: item.desireId, title: item.title, category });
-        }
-      }
-      buckets.push({ category, items: items.map((item) => item.title) });
-    }
-
+    const overview = await this.readLifestormingOverview();
+    const bySection = new Map(overview.desiresBySection.map((section) => [section.section, section.items]));
     return {
-      url: page.url(),
-      buckets,
-      snippet: await this.readBodySnippet()
+      url: overview.url,
+      buckets: [
+        { category: "feel_it_out", items: bySection.get("feel_it_out") ?? [] },
+        { category: "start_a_goal", items: bySection.get("start_a_goal") ?? [] }
+      ],
+      snippet: overview.snippet
     };
   }
 
@@ -1602,6 +1873,7 @@ export class SelfMaxPlaywrightClient {
       url: string;
       stepTexts: string[];
       visibleDesires: string[];
+      desiresBySection: Array<{ section: "feel_it_out" | "start_a_goal"; items: string[] }>;
       snippet: string;
     };
     buckets: Array<{ category: string; items: string[] }>;
@@ -1611,8 +1883,8 @@ export class SelfMaxPlaywrightClient {
     const overview = await this.readLifestormingOverview();
     const desires = await this.listLifestormingDesires();
     const categories: Array<{ category?: string; intro?: string; items: string[] }> = [];
-    for (const bucket of desires.buckets) {
-      categories.push(await this.readLifestormingCategory(bucket.category));
+    for (const category of ["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"]) {
+      categories.push(await this.readLifestormingCategory(category));
     }
     return {
       overview,
@@ -1781,10 +2053,15 @@ export class SelfMaxPlaywrightClient {
 
   private async addTasks(
     goalTitle: string | undefined,
+    goalId: string | undefined,
     tasks: string[],
     useSuggestions: boolean
   ): Promise<{ added: number; goalTitle?: string; usedSuggestions: boolean }> {
-    await this.ensureOnGoalTaskContext(goalTitle);
+    const summary = await this.getGoalTaskSummary(goalTitle, goalId);
+    if (summary?.taskPanelState === "empty") {
+      throw new Error(`add_tasks refused: goal has no task entry point from /goals summary (${summary.title})`);
+    }
+    await this.ensureOnGoalTaskContext(goalTitle, goalId);
     const page = this.pageOrThrow();
 
     if (useSuggestions) {
@@ -1797,6 +2074,9 @@ export class SelfMaxPlaywrightClient {
     }
 
     let added = 0;
+    if (summary?.taskPanelState === "add_tasks") {
+      await this.tryClickByText(page, ["ADD TASKS", "Add Tasks", "Use the task suggestion tool"]);
+    }
     for (const task of tasks.filter((t) => t.trim().length > 0)) {
       await this.tryClickByText(page, ["Add new task", "Add task", "New task"]);
       const field = await this.resolveTaskInput();
@@ -1808,11 +2088,15 @@ export class SelfMaxPlaywrightClient {
     return { added, goalTitle, usedSuggestions: false };
   }
 
-  private async removeTask(goalTitle: string | undefined, taskText: string): Promise<{ removed: boolean }> {
+  private async removeTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string): Promise<{ removed: boolean }> {
     if (!taskText.trim()) {
       throw new Error("remove_task requires taskText");
     }
-    await this.ensureOnGoalTaskContext(goalTitle);
+    const summary = await this.getGoalTaskSummary(goalTitle, goalId);
+    if (summary?.taskPanelState !== "tasks_present") {
+      throw new Error(`remove_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
+    }
+    await this.ensureOnGoalTaskContext(goalTitle, goalId);
     const row = await this.resolveTaskRow(taskText);
 
     const removed =
@@ -1826,11 +2110,15 @@ export class SelfMaxPlaywrightClient {
     return { removed: true };
   }
 
-  private async completeTask(goalTitle: string | undefined, taskText: string): Promise<{ completed: boolean }> {
+  private async completeTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string): Promise<{ completed: boolean }> {
     if (!taskText.trim()) {
       throw new Error("complete_task requires taskText");
     }
-    await this.ensureOnGoalTaskContext(goalTitle);
+    const summary = await this.getGoalTaskSummary(goalTitle, goalId);
+    if (summary?.taskPanelState !== "tasks_present") {
+      throw new Error(`complete_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
+    }
+    await this.ensureOnGoalTaskContext(goalTitle, goalId);
     const row = await this.resolveTaskRow(taskText);
 
     const checkbox = row.locator('input[type="checkbox"]').first();
@@ -1849,11 +2137,15 @@ export class SelfMaxPlaywrightClient {
     return { completed: true };
   }
 
-  private async uncompleteTask(goalTitle: string | undefined, taskText: string): Promise<{ uncompleted: boolean }> {
+  private async uncompleteTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string): Promise<{ uncompleted: boolean }> {
     if (!taskText.trim()) {
       throw new Error("uncomplete_task requires taskText");
     }
-    await this.ensureOnGoalTaskContext(goalTitle);
+    const summary = await this.getGoalTaskSummary(goalTitle, goalId);
+    if (summary?.taskPanelState !== "tasks_present") {
+      throw new Error(`uncomplete_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
+    }
+    await this.ensureOnGoalTaskContext(goalTitle, goalId);
     const row = await this.resolveTaskRow(taskText);
 
     const checkbox = row.locator('input[type="checkbox"]').first();
@@ -2101,30 +2393,48 @@ export class SelfMaxPlaywrightClient {
     await this.ensureGoalsWorkspaceVisible();
   }
 
-  private async ensureOnGoalTaskContext(goalTitle?: string): Promise<void> {
-    if (goalTitle) {
+  private async ensureOnGoalTaskContext(goalTitle?: string, goalId?: string): Promise<void> {
+    if (goalId) {
+      await this.openGoalContextById(goalId);
+      await this.waitForGoalDataLoaded();
+    } else if (goalTitle) {
       await this.openGoalContext(goalTitle);
     } else if (!this.pageOrThrow().url().includes("/self-maximize")) {
       await this.startGoal();
     }
 
+    await this.openTaskPanel();
+    await this.ensureTaskPanelVisible();
+  }
+
+  private async openTaskPanel(): Promise<void> {
     const page = this.pageOrThrow();
     const tabByRole = page.getByRole("button", { name: /^tasks$/i }).first();
-    if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
-      await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
-    } else {
-      await this.tryClickByText(page, ["TASKS", "Tasks"]);
-    }
-
-    if (!(await this.isTaskPanelVisible())) {
-      await this.tryClickByText(page, ["EDIT", "Edit"]);
-      if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
-        await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
-      } else {
+    const attempts: Array<() => Promise<void>> = [
+      async () => {
+        if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
+          await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
+        }
+      },
+      async () => {
         await this.tryClickByText(page, ["TASKS", "Tasks"]);
+      },
+      async () => {
+        await this.tryClickByText(page, ["EDIT", "Edit"]);
+        if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
+          await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
+        } else {
+          await this.tryClickByText(page, ["TASKS", "Tasks"]);
+        }
+      }
+    ];
+
+    for (const attempt of attempts) {
+      await attempt();
+      if (await this.waitForTaskPanelData(2500)) {
+        return;
       }
     }
-    await this.ensureTaskPanelVisible();
   }
 
   private async openGoalContext(goalTitle: string): Promise<void> {
@@ -2221,6 +2531,22 @@ export class SelfMaxPlaywrightClient {
       }
       await page.waitForTimeout(250);
     }
+  }
+
+  private async waitForTaskPanelData(timeoutMs = 5000): Promise<boolean> {
+    const page = this.pageOrThrow();
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await this.isTaskPanelVisible()) {
+        return true;
+      }
+      const bodyText = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
+      if (/How will you accomplish|Select Tasks|Add new task|Use the task suggestion tool/i.test(bodyText)) {
+        return true;
+      }
+      await page.waitForTimeout(250);
+    }
+    return false;
   }
 
   private async isGoalContextOpen(goalTitle?: string): Promise<boolean> {
@@ -2783,6 +3109,9 @@ export class SelfMaxPlaywrightClient {
     category?: string;
     dueLabel?: string;
     progressLabel?: string;
+    taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+    taskSummaryLabel?: string;
+    taskPreviewItems?: string[];
   }): void {
     const existing = this.entityCache.goalsById[entry.goalId];
     this.entityCache.goalsById[entry.goalId] = {
@@ -2791,6 +3120,9 @@ export class SelfMaxPlaywrightClient {
       category: entry.category ?? existing?.category,
       dueLabel: entry.dueLabel ?? existing?.dueLabel,
       progressLabel: entry.progressLabel ?? existing?.progressLabel,
+      taskPanelState: entry.taskPanelState ?? existing?.taskPanelState,
+      taskSummaryLabel: entry.taskSummaryLabel ?? existing?.taskSummaryLabel,
+      taskPreviewItems: entry.taskPreviewItems ?? existing?.taskPreviewItems,
       lastSeenAt: new Date().toISOString()
     };
   }
