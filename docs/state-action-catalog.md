@@ -1,6 +1,6 @@
 # SelfMax State + Action Catalog (First Pass)
 
-Source: manual reconnaissance in `states.md`.
+Source: manual reconnaissance in `docs/selfmax-route-state-action-spec.md`.
 
 ## Routes
 
