@@ -29,8 +29,7 @@ export const selectors = {
   coach: {
     input: [
       { tier: "primary", selector: 'textarea[placeholder="Type your message..."]' },
-      { tier: "fallback", selector: '[contenteditable="true"]' },
-      { tier: "legacy", selector: 'textarea, input[type="text"], input:not([type])' }
+      { tier: "fallback", selector: '[contenteditable="true"]' }
     ] satisfies CssSelectorCandidate[]
   },
   goals: {
@@ -40,17 +39,14 @@ export const selectors = {
     ] satisfies TextSelectorCandidate[],
     createGoalOpeners: [
       { tier: "primary", text: "NEW GOAL" },
-      { tier: "fallback", text: "I KNOW WHAT MY GOAL IS" },
-      { tier: "legacy", text: "Create a New Goal" }
+      { tier: "fallback", text: "I KNOW WHAT MY GOAL IS" }
     ] satisfies TextSelectorCandidate[],
     editActions: [
       { tier: "primary", text: "EDIT" },
       { tier: "fallback", text: "Edit" }
     ] satisfies TextSelectorCandidate[],
     cardOpenActions: [
-      { tier: "primary", text: "START" },
-      { tier: "fallback", text: "Open" },
-      { tier: "legacy", text: "View" }
+      { tier: "primary", text: "START" }
     ] satisfies TextSelectorCandidate[],
     taskEntryActions: [
       { tier: "primary", text: "ADD TASKS" },
@@ -60,19 +56,15 @@ export const selectors = {
     statusActions: {
       completed: [
         { tier: "primary", text: "COMPLETE GOAL" },
-        { tier: "fallback", text: "Complete Goal" },
-        { tier: "legacy", text: "Mark Complete" }
+        { tier: "fallback", text: "Complete Goal" }
       ] satisfies TextSelectorCandidate[],
       archived: [
         { tier: "primary", text: "ARCHIVE GOAL" },
-        { tier: "fallback", text: "Archive Goal" },
-        { tier: "legacy", text: "Archive" }
+        { tier: "fallback", text: "Archive Goal" }
       ] satisfies TextSelectorCandidate[],
       active: [
         { tier: "primary", text: "REACTIVATE GOAL" },
-        { tier: "fallback", text: "Reactivate Goal" },
-        { tier: "fallback", text: "Reactivate" },
-        { tier: "legacy", text: "Set Active" }
+        { tier: "fallback", text: "Reactivate Goal" }
       ] satisfies TextSelectorCandidate[]
     }
   },
@@ -84,8 +76,7 @@ export const selectors = {
     panelAnchors: [
       { tier: "primary", text: "How will you accomplish" },
       { tier: "primary", text: "Add new task" },
-      { tier: "fallback", text: "Use the task suggestion tool" },
-      { tier: "legacy", text: "Select Tasks" }
+      { tier: "fallback", text: "Use the task suggestion tool" }
     ] satisfies TextSelectorCandidate[]
   },
   lifestorming: {

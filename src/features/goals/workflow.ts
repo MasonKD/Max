@@ -3,12 +3,15 @@ import type { AuthState, GoalStatusBlock, GoalStatusDetail, GoalSummary, TaskIte
 import type { SearchRoot } from "../../platform/navigation.js";
 import { config } from "../../core/config.js";
 import { extractGoalsOverview, extractGoalSummariesFromText, dedupeGoalSummaries } from "../../platform/extractors.js";
-import { readBodySnippet } from "../../platform/diagnostics.js";
-import { goalIdFromUrl, normalizeDateInput, titleCase } from "../../platform/navigation.js";
-import { selectors, textSelectors } from "../../platform/selectors.js";
-import { StateError } from "../../core/recovery.js";
-import { knownRoutes, type KnownRouteId } from "../../platform/catalog.js";
+import { goalIdFromUrl, normalizeDateInput } from "../../platform/navigation.js";
 import type { GoalCacheEntry } from "../../client/entityCache.js";
+
+type DesireGoalInput = Array<{
+  title: string;
+  dueDate: string;
+  goalTitle?: string;
+  goalCategory?: string;
+}>;
 
 export type GoalsWorkflowDeps = {
   ensurePage: () => Page;
@@ -81,7 +84,7 @@ export type GoalsWorkflowDeps = {
   clickGoalCardTaskRemove: (goalTitle: string, taskText: string) => Promise<boolean>;
   entityGoals: () => Record<string, GoalCacheEntry>;
   isGoalContextOpen: (goalTitle?: string) => Promise<boolean>;
-  tryPromoteDesireToGoal: (desireTitle: string) => Promise<boolean>;
+  resolveDesireCategory: (desireTitle: string) => Promise<string | undefined>;
   updateGoalDueDateFromGoals: (goalTitle: string, dueDateInput: string) => Promise<boolean>;
   formatGoalDueLabel: (input: string) => string | null;
   waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => Promise<boolean>;
@@ -544,50 +547,32 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       throw new Error(`create_goal submission did not increase active goal count (before=${activeBefore} title=${input.title} snippet=${snippet})`);
     },
 
-    async createGoalsFromDesires(rawDesires: unknown[]) {
-      const desires = rawDesires.map((entry) => {
-        if (typeof entry === "string") return { title: entry, category: undefined, dueDate: undefined };
-        if (typeof entry === "object" && entry !== null) {
-          const obj = entry as Record<string, unknown>;
-          const sourceTitle =
-            typeof obj.title === "string" ? obj.title :
-            typeof obj.desireTitle === "string" ? obj.desireTitle :
-            "";
-          const sourceCategory =
-            typeof obj.category === "string" ? obj.category :
-            typeof obj.desireCategory === "string" ? obj.desireCategory :
-            typeof obj.bucket === "string" ? obj.bucket :
-            undefined;
-          const overrideTitle =
-            typeof obj.goalTitle === "string" ? obj.goalTitle :
-            typeof obj.overrideTitle === "string" ? obj.overrideTitle :
-            undefined;
-          const overrideCategory =
-            typeof obj.goalCategory === "string" ? obj.goalCategory :
-            typeof obj.overrideCategory === "string" ? obj.overrideCategory :
-            undefined;
-          return {
-            title: String(overrideTitle ?? sourceTitle ?? ""),
-            category: typeof (overrideCategory ?? sourceCategory) === "string" ? String(overrideCategory ?? sourceCategory) : undefined,
-            dueDate: typeof obj.dueDate === "string" ? obj.dueDate : undefined
-          };
-        }
-        return { title: "", category: undefined, dueDate: undefined };
-      }).filter((entry) => entry.title.trim().length > 0);
-      assertUniqueNormalized(desires.map((entry) => entry.title), "desire titles");
-      assertUniqueNormalized(desires.map((entry) => entry.title), "resulting goal titles");
+    async createGoalsFromDesires(rawDesires: DesireGoalInput) {
+      const desires = rawDesires
+        .map((entry) => ({
+          lookupTitle: entry.title.trim(),
+          goalTitle: (entry.goalTitle ?? entry.title).trim(),
+          goalCategory: entry.goalCategory?.trim(),
+          dueDate: entry.dueDate.trim()
+        }))
+        .filter((entry) => entry.lookupTitle.length > 0);
+      assertUniqueNormalized(desires.map((entry) => entry.lookupTitle), "desire titles");
+      assertUniqueNormalized(desires.map((entry) => entry.goalTitle), "resulting goal titles");
       const created: string[] = [];
       for (const desire of desires) {
-        if (!desire.category?.trim()) throw new Error(`create_goals_from_desires requires category for "${desire.title}"`);
-        if (!desire.dueDate?.trim()) throw new Error(`create_goals_from_desires requires dueDate for "${desire.title}"`);
-        await this.createGoal({ title: desire.title, category: desire.category, dueDate: desire.dueDate });
-        created.push(desire.title);
+        const category = desire.goalCategory ?? await deps.resolveDesireCategory(desire.lookupTitle);
+        if (!category) {
+          throw new Error(`create_goals_from_desires requires goalCategory or cached desire category for "${desire.lookupTitle}"`);
+        }
+        if (!desire.dueDate) throw new Error(`create_goals_from_desires requires dueDate for "${desire.lookupTitle}"`);
+        await this.createGoal({ title: desire.goalTitle, category, dueDate: desire.dueDate });
+        created.push(desire.goalTitle);
       }
       return { created };
     },
 
     async updateGoalDueDate(goalTitle?: string, goalId?: string, dueDateInput?: string) {
-      if (!dueDateInput?.trim()) throw new Error("update_goal_due_date requires dueDate");
+      if (!dueDateInput?.trim()) throw new Error("update_goal requires dueDate");
       const normalizedDate = normalizeDateInput(dueDateInput);
       if (!normalizedDate) throw new Error(`invalid dueDate: ${dueDateInput}`);
       const expectedLabel = deps.formatGoalDueLabel(normalizedDate);
@@ -599,7 +584,7 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       }
       if (resolvedGoalTitle && expectedLabel) {
         const labelMatches = await deps.waitForGoalDueLabel(resolvedGoalTitle, expectedLabel, 3000).catch(() => false);
-        if (!labelMatches) throw new Error(`update_goal_due_date postcondition failed for ${resolvedGoalTitle}`);
+        if (!labelMatches) throw new Error(`update_goal dueDate postcondition failed for ${resolvedGoalTitle}`);
       }
       return { updated: true, goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, dueDate: normalizedDate };
     },
@@ -607,7 +592,7 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     async updateGoal(goalTitle: string, updates: { status?: "active" | "completed" | "archived"; dueDate?: string }) {
       if (!goalTitle.trim()) throw new Error("update_goal requires goalTitle");
       if (!updates.status && !updates.dueDate) throw new Error("update_goal requires status or dueDate");
-      const applied: Record<string, unknown> = { goalTitle };
+      const applied: { goalTitle: string; dueDate?: string; status?: "active" | "completed" | "archived" } = { goalTitle };
       if (updates.dueDate) {
         const due = await this.updateGoalDueDate(goalTitle, undefined, updates.dueDate);
         applied.dueDate = due.dueDate;
@@ -687,7 +672,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       if (summary?.taskPanelState === "empty") throw new Error(`add_tasks refused: goal has no task entry point from /goals summary (${summary.title})`);
       await deps.ensureOnGoalTaskContext(goalTitle, goalId);
       const page = deps.pageOrThrow();
-      const resolvedGoalId = goalId ?? goalIdFromUrl(page.url()) ?? summary?.goalId;
       const existingTasks = await deps.readVisibleTaskItems().catch(() => [] as TaskItem[]);
       const existingTaskKeys = new Set(existingTasks.map((task) => normalizeKey(task.text)).filter(Boolean));
       for (const task of requestedTasks) {

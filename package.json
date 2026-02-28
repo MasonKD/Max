@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "smoke:login": "node scripts/selfmax-smoke.mjs login",
     "smoke:probe": "node scripts/selfmax-smoke.mjs probe",
+    "smoke:public": "node --loader ts-node/esm scripts/public-api-smoke.ts",
     "smoke:sequence": "node scripts/selfmax-smoke.mjs sequence",
     "smoke:keep-open": "node scripts/selfmax-smoke.mjs keep-open",
     "smoke:signin": "node scripts/selfmax-smoke.mjs signin-diagnostic"

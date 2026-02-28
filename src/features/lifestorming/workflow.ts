@@ -6,6 +6,10 @@ import { extractRouteParams } from "../../platform/navigation.js";
 import { StateError } from "../../core/recovery.js";
 import type { DesireCacheEntry } from "../../client/entityCache.js";
 
+type LifestormingCategory = "Health" | "Work" | "Love" | "Family" | "Social" | "Fun" | "Dreams" | "Meaning";
+type CategoryItems = Partial<Record<LifestormingCategory, string[]>>;
+type DesireNotes = Array<{ title: string; notes: string }>;
+
 export type LifestormingWorkflowDeps = {
   ensurePage: () => Page;
   pageOrThrow: () => Page;
@@ -55,7 +59,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
   }
 
   return {
-    async brainstormDesiresForEachCategory(itemsByCategory: Record<string, unknown>) {
+    async brainstormDesiresForEachCategory(itemsByCategory: CategoryItems) {
       const page = deps.ensurePage();
       const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
       const requestedItems = Object.values(itemsByCategory)
@@ -70,7 +74,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
         }
       }
       let added = 0;
-      const categories = Object.keys(itemsByCategory);
+      const categories = Object.keys(itemsByCategory) as LifestormingCategory[];
       for (const category of categories) {
         await page.goto(`${base}/lifestorming/desires-selection/${category.toLowerCase()}`, {
           waitUntil: "domcontentloaded"
@@ -90,20 +94,9 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       return { categoriesUpdated: categories, itemsAdded: added };
     },
 
-    async feelOutDesires(rawDesires: unknown[]) {
+    async feelOutDesires(rawDesires: DesireNotes) {
       const page = deps.ensurePage();
-      const desires = rawDesires
-        .map((entry) => {
-          if (typeof entry === "string") return { title: entry, notes: `Resonance check for ${entry}: feels actionable and meaningful.` };
-          if (entry && typeof entry === "object") {
-            const obj = entry as Record<string, unknown>;
-            const title = String(obj.title ?? "");
-            const notes = String(obj.notes ?? `Resonance check for ${title}: feels actionable and meaningful.`);
-            return { title, notes };
-          }
-          return { title: "", notes: "" };
-        })
-        .filter((entry) => entry.title.trim().length > 0);
+      const desires = rawDesires.filter((entry) => entry.title.trim().length > 0);
       const processed: Array<{ title: string; notes: string }> = [];
       for (const desire of desires) {
         await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/lifestorming`, { waitUntil: "domcontentloaded" });
@@ -218,14 +211,6 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       const row = await deps.resolveRowByText(desire, false);
       if (row) viewed = (await deps.tryClickByText(page, ["VIEW", "GO", "Open"], row)) || (await deps.tryClickByText(page, [desire]));
       if (!viewed) throw new Error(`could not open desire for feel-out: ${desire}`);
-    },
-
-    async tryPromoteDesireToGoal(desireTitle: string): Promise<boolean> {
-      const page = deps.pageOrThrow();
-      await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/lifestorming`, { waitUntil: "domcontentloaded" });
-      const row = await deps.resolveRowByText(desireTitle, false);
-      if (!row) return false;
-      return deps.tryClickByText(page, ["ADD TO GOALS", "Add to goals"], row);
     },
 
     async withTemporaryPage<T>(fn: (page: Page) => Promise<T>): Promise<T> {

@@ -89,6 +89,7 @@ Then run one of:
 ```bash
 npm run smoke:login
 npm run smoke:probe
+npm run smoke:public
 npm run smoke:sequence
 npm run smoke:keep-open
 npm run smoke:signin
@@ -101,23 +102,16 @@ node scripts/selfmax-smoke.mjs read-goals-overview
 node scripts/selfmax-smoke.mjs route-snapshot --route goals
 node scripts/selfmax-smoke.mjs read-page-sections --route help
 node scripts/selfmax-smoke.mjs discover-links --route map
-node scripts/selfmax-smoke.mjs read-goal --goal-id <id>
-node scripts/selfmax-smoke.mjs read-goal-metadata --goal-id <id>
-node scripts/selfmax-smoke.mjs read-goal-workspace --goal-id <id>
-node scripts/selfmax-smoke.mjs read-goal-full --goal-id <id>
-node scripts/selfmax-smoke.mjs read-cached-goals
+node scripts/selfmax-smoke.mjs read-goal-full --goal-title "MVP Automation Goal"
 node scripts/selfmax-smoke.mjs read-cached-desires
-node scripts/selfmax-smoke.mjs read-task-panel-snapshot --goal-id <id>
-node scripts/selfmax-smoke.mjs survey-active-goal-task-states
-node scripts/selfmax-smoke.mjs read-tasks --goal-id <id>
-node scripts/selfmax-smoke.mjs read-goal-chat --goal-id <id>
+node scripts/selfmax-smoke.mjs read-tasks --goal-title "MVP Automation Goal"
+node scripts/selfmax-smoke.mjs read-goal-chat --goal-title "MVP Automation Goal"
 node scripts/selfmax-smoke.mjs read-lifestorming-overview
-node scripts/selfmax-smoke.mjs list-desires
-node scripts/selfmax-smoke.mjs read-desire-category --message Health
-node scripts/selfmax-smoke.mjs read-lifestorming-full
 node scripts/selfmax-smoke.mjs read-sensation-practice --desire-id <desire-id>
 node scripts/selfmax-smoke.mjs update-goal-due-date --goal-title "go rock climbing" --due-date 2026-03-15
 ```
+
+`npm run smoke:public` verifies only the public API adapter surface. It avoids private primitives so contract hardening stays focused on the real external interface.
 
 Goal creation requires explicit inputs:
 - `create_goal` requires `title`, `category`, and `dueDate`

@@ -1,5 +1,5 @@
 import type { Locator, Page } from "playwright";
-import type { AuthState, SessionContext } from "../../core/types.js";
+import type { AuthState, SessionContext, StateSnapshot } from "../../core/types.js";
 import { config } from "../../core/config.js";
 import { selectors, cssSelectors } from "../../platform/selectors.js";
 import { AuthError } from "../../core/recovery.js";
@@ -141,7 +141,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       });
     },
 
-    async getState(session: SessionContext): Promise<Record<string, unknown>> {
+    async getState(session: SessionContext): Promise<StateSnapshot> {
       const page = deps.ensurePage();
       const key = deps.storageKeyFor(session);
       return page.evaluate((storageKey) => {

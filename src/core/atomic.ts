@@ -1,5 +1,5 @@
 export class AtomicExecutor {
-  private queue: Promise<unknown> = Promise.resolve();
+  private queue: Promise<void> = Promise.resolve();
 
   run<T>(task: () => Promise<T>): Promise<T> {
     const next = this.queue.then(task, task);

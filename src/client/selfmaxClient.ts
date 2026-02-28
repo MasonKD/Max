@@ -2,8 +2,10 @@ import { chromium, type Browser, type BrowserContext, type Page } from "playwrig
 import { existsSync } from "node:fs";
 import { config } from "../core/config.js";
 import { AtomicExecutor } from "../core/atomic.js";
-import type { PrimitiveName, PrimitiveRequest, PrimitiveResponse, SessionContext } from "../core/types.js";
+import type { PrimitiveName, PrimitiveRequest, PrimitiveResponseOf, SessionContext } from "../core/types.js";
 import { createReadPrimitiveHandlers, createWritePrimitiveHandlers } from "../api/index.js";
+import type { PrimitiveReadResult } from "../api/primitives-read.js";
+import type { PrimitiveWriteResult } from "../api/primitives-write.js";
 import { clickByText, resolveFirstVisible, tryClickByCss, tryClickByText } from "../platform/navigation.js";
 import { formatError } from "../core/recovery.js";
 import { SessionGate } from "./sessionGate.js";
@@ -97,7 +99,16 @@ export class SelfMaxPlaywrightClient {
     clickGoalCardTaskRemove: (goalTitle: string, taskText: string) => this.goalsSupport.clickGoalCardTaskRemove(goalTitle, taskText),
     entityGoals: () => this.entityCache.goalsById,
     isGoalContextOpen: (goalTitle?: string) => this.goalsSupport.isGoalContextOpen(goalTitle),
-    tryPromoteDesireToGoal: (desireTitle: string) => this.lifestormingWorkflow.tryPromoteDesireToGoal(desireTitle),
+    resolveDesireCategory: async (desireTitle: string) => {
+      const normalized = desireTitle.trim().toLowerCase();
+      for (const entry of Object.values(this.entityCache.desiresById)) {
+        if (entry.title?.trim().toLowerCase() === normalized && entry.category?.trim()) {
+          return entry.category;
+        }
+      }
+      const result = await this.lifestormingWorkflow.readSensationPractice(undefined, desireTitle).catch(() => null);
+      return result?.category?.trim() ? result.category : undefined;
+    },
     updateGoalDueDateFromGoals: (goalTitle: string, dueDateInput: string) => this.goalsSupport.updateGoalDueDateFromGoals(goalTitle, dueDateInput),
     formatGoalDueLabel: (input: string) => this.goalsSupport.formatGoalDueLabel(input),
     waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => this.goalsSupport.waitForGoalDueLabel(goalTitle, expectedLabel, timeoutMs),
@@ -118,7 +129,7 @@ export class SelfMaxPlaywrightClient {
     findDesireIdByTitle: (title: string) => findDesireIdByTitle(this.entityCache, title),
     entityDesires: () => this.entityCache.desiresById
   });
-  private readonly handlers = {
+  private readonly handlers: Partial<Record<PrimitiveName, (req: PrimitiveRequest, session: SessionContext) => Promise<PrimitiveReadResult | PrimitiveWriteResult>>> = {
     ...createReadPrimitiveHandlers({
       login: () => this.authWorkflow.login(),
       getState: (session) => this.authWorkflow.getState(session),
@@ -159,7 +170,7 @@ export class SelfMaxPlaywrightClient {
       completeTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.completeTask(goalTitle, goalId, taskText),
       uncompleteTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.uncompleteTask(goalTitle, goalId, taskText)
     })
-  } satisfies Partial<Record<PrimitiveName, (req: PrimitiveRequest, session: SessionContext) => Promise<unknown>>>;
+  };
 
   async init(): Promise<void> {
     this.browser = await chromium.launch({ headless: config.HEADLESS });
@@ -176,7 +187,7 @@ export class SelfMaxPlaywrightClient {
     await this.browser?.close();
   }
 
-  async execute(req: PrimitiveRequest, session: SessionContext): Promise<PrimitiveResponse> {
+  async execute(req: PrimitiveRequest, session: SessionContext): Promise<PrimitiveResponseOf<PrimitiveReadResult | PrimitiveWriteResult>> {
     try {
       const result = await this.atomic.run(async () => {
         const handler = this.handlers[req.name];

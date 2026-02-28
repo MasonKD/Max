@@ -13,8 +13,20 @@ import type {
   SessionContext
 } from "../core/types.js";
 import type { SelfMaxPlaywrightClient } from "../client/index.js";
+import {
+  isPublicCategory,
+  normalizeChatHistory,
+  normalizeTaskSummary,
+  parseCompletionPercent,
+  parseDueLabel,
+  requirePublicCategory,
+  requirePublicDueDate,
+  sliceDepth,
+  type InternalGoalListEntry,
+  type InternalPrimitiveName
+} from "./normalizers.js";
 
-type PublicTaskStatus = "pending" | "completed" | "unknown";
+export type PublicTaskStatus = "pending" | "completed" | "unknown";
 export type PublicCategory = "Health" | "Work" | "Love" | "Family" | "Social" | "Fun" | "Dreams" | "Meaning";
 export type PublicDueDate = string;
 export type PublicGoalStatus = "active" | "completed" | "archived";
@@ -103,7 +115,24 @@ export type PublicApiResultMap = {
 };
 
 type PublicApiResult<Name extends PublicApiRequest["name"]> = PublicApiResultMap[Name];
-type InternalGoalListEntry = NonNullable<InternalGoalListResult["goals"]>[number];
+type PublicApiInputMap = {
+  get_state: undefined;
+  get_goals: { status?: PublicGoalStatus; category?: PublicCategory; deep?: boolean } | undefined;
+  get_goal: { goalTitle: string; depth?: number };
+  get_goal_tasks: { goalTitle: string };
+  get_goal_chat: { goalTitle: string; depth?: number };
+  get_desires: { deep?: boolean } | undefined;
+  get_desire: { desireTitle: string };
+  get_actions: undefined;
+  talk_to_guide: { message: string };
+  talk_to_goal_chat: { goalTitle: string; message: string };
+  add_desires: { itemsByCategory: PublicAddDesiresInput["itemsByCategory"] };
+  update_desires: { desires: PublicUpdateDesireItem[] };
+  create_goals_from_desires: { desires: PublicCreateGoalFromDesireItem[] };
+  create_goal: { title: string; category: PublicCategory; dueDate: PublicDueDate };
+  update_goal: { goalTitle: string; status?: PublicGoalStatus; dueDate?: PublicDueDate };
+  update_tasks: { goalTitle: string; updates: PublicTaskUpdate[] };
+};
 
 const publicActions: PublicAction[] = [
   { name: "get_state", mutating: false, description: "Expensive full-state sweep across goals, tasks, desires, and chats.", input: "{}", output: "{ goals: PublicGoalSummary[]; desires: PublicDesireSummary[] }" },
@@ -124,67 +153,15 @@ const publicActions: PublicAction[] = [
   { name: "update_tasks", mutating: true, description: "Apply add/complete/uncomplete/remove actions to tasks within a goal.", input: "{ goalTitle: string; updates: Array<{ task: string; action: \"add\" | \"complete\" | \"uncomplete\" | \"remove\" }> }", output: "{ goalTitle: string; applied: Array<{ task: string; action: string }>; tasks: PublicTaskSummary[] }" }
 ];
 
-function parseDueLabel(label: unknown): string | undefined {
-  if (typeof label !== "string") return undefined;
-  const match = label.match(/Due\s+(\d{2})\/(\d{2})\/(\d{2})/i);
-  if (!match) return label;
-  const year = Number(match[3]);
-  const fullYear = year >= 70 ? 1900 + year : 2000 + year;
-  return `${fullYear}-${match[1]}-${match[2]}`;
-}
-
-function isPublicCategory(value: unknown): value is PublicCategory {
-  return ["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"].includes(String(value));
-}
-
-function requirePublicCategory(value: unknown, goalTitle: string): PublicCategory {
-  if (!isPublicCategory(value)) {
-    throw new Error(`missing or invalid category for goal "${goalTitle}"`);
-  }
-  return value;
-}
-
-function requirePublicDueDate(value: unknown, goalTitle: string): PublicDueDate {
-  if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`missing due date for goal "${goalTitle}"`);
-  }
-  return value;
-}
-
-function parseCompletionPercent(label: unknown): number | undefined {
-  if (typeof label !== "string") return undefined;
-  const percentMatch = label.match(/(\d+)%/);
-  if (percentMatch?.[1]) return Number(percentMatch[1]);
-  return undefined;
-}
-
-function normalizeTaskSummary(task: any): PublicTaskSummary {
-  return {
-    title: String(task?.text ?? task?.title ?? ""),
-    status: task?.completed === true ? "completed" : task?.completed === false ? "pending" : "unknown"
-  };
-}
-
-function normalizeChatHistory(messages: unknown[] | undefined, depth?: number): string[] {
-  const normalized = Array.isArray(messages) ? messages.map((value) => String(value)).reverse() : [];
-  return sliceDepth(normalized, depth);
-}
-
-function sliceDepth<T>(items: T[], depth: number | undefined): T[] {
-  if (depth === -1) return items;
-  const normalized = typeof depth === "number" ? Math.max(0, depth) : 0;
-  return items.slice(-(normalized + 1));
-}
-
 export class PublicApi {
   constructor(private readonly client: SelfMaxPlaywrightClient) {}
 
   async execute<Name extends PublicApiRequest["name"]>(
-    req: Extract<PublicApiRequest, { name: Name }> | PublicApiRequest,
+    req: Extract<PublicApiRequest, { name: Name }>,
     session: SessionContext
   ): Promise<PublicApiResponse<PublicApiResult<Name>>> {
     try {
-      const result = await this.handle(req as Extract<PublicApiRequest, { name: Name }>, session);
+      const result = await this.handle(req, session);
       return { id: req.id, ok: true, result };
     } catch (error) {
       return {
@@ -196,7 +173,7 @@ export class PublicApi {
   }
 
   private async handle<Name extends PublicApiRequest["name"]>(
-    req: Extract<PublicApiRequest, { name: Name }> | PublicApiRequest,
+    req: Extract<PublicApiRequest, { name: Name }>,
     session: SessionContext
   ): Promise<PublicApiResult<Name>> {
     if (req.name !== "get_actions") {
@@ -206,45 +183,65 @@ export class PublicApi {
     switch (req.name) {
       case "get_actions":
         return { actions: publicActions } as PublicApiResult<Name>;
-      case "talk_to_guide":
-        return await this.talkToGuide(session, String(req.payload?.message ?? "")) as PublicApiResult<Name>;
-      case "talk_to_goal_chat":
-        return await this.talkToGoalChat(session, String(req.payload?.goalTitle ?? ""), String(req.payload?.message ?? "")) as PublicApiResult<Name>;
-      case "add_desires":
-        return await this.brainstormDesires(session, (req.payload?.itemsByCategory as PublicAddDesiresInput["itemsByCategory"]) ?? {}) as PublicApiResult<Name>;
-      case "update_desires":
-        return await this.feelOutDesires(session, (req.payload?.desires as PublicUpdateDesireItem[]) ?? []) as PublicApiResult<Name>;
-      case "create_goals_from_desires":
-        return await this.createGoalsFromDesires(session, (req.payload?.desires as PublicCreateGoalFromDesireItem[]) ?? []) as PublicApiResult<Name>;
-      case "create_goal":
-        return await this.createGoal(session, {
-          title: String(req.payload?.title ?? ""),
-          category: req.payload?.category as PublicCategory,
-          dueDate: String(req.payload?.dueDate ?? "")
+      case "talk_to_guide": {
+        const payload = req.payload as PublicApiInputMap["talk_to_guide"];
+        return await this.talkToGuide(session, payload.message) as PublicApiResult<Name>;
+      }
+      case "talk_to_goal_chat": {
+        const payload = req.payload as PublicApiInputMap["talk_to_goal_chat"];
+        return await this.talkToGoalChat(session, payload.goalTitle, payload.message) as PublicApiResult<Name>;
+      }
+      case "add_desires": {
+        const payload = req.payload as PublicApiInputMap["add_desires"];
+        return await this.brainstormDesires(session, payload.itemsByCategory) as PublicApiResult<Name>;
+      }
+      case "update_desires": {
+        const payload = req.payload as PublicApiInputMap["update_desires"];
+        return await this.feelOutDesires(session, payload.desires) as PublicApiResult<Name>;
+      }
+      case "create_goals_from_desires": {
+        const payload = req.payload as PublicApiInputMap["create_goals_from_desires"];
+        return await this.createGoalsFromDesires(session, payload.desires) as PublicApiResult<Name>;
+      }
+      case "create_goal": {
+        const payload = req.payload as PublicApiInputMap["create_goal"];
+        return await this.createGoal(session, payload) as PublicApiResult<Name>;
+      }
+      case "update_goal": {
+        const payload = req.payload as PublicApiInputMap["update_goal"];
+        return await this.updateGoal(session, payload.goalTitle, {
+          status: payload.status,
+          dueDate: payload.dueDate
         }) as PublicApiResult<Name>;
-      case "update_goal":
-        return await this.updateGoal(session, String(req.payload?.goalTitle ?? ""), {
-          status: req.payload?.status as PublicGoalStatus | undefined,
-          dueDate: typeof req.payload?.dueDate === "string" ? req.payload.dueDate : undefined
-        }) as PublicApiResult<Name>;
-      case "update_tasks":
-        return await this.updateTasks(session, String(req.payload?.goalTitle ?? ""), (req.payload?.updates as PublicTaskUpdate[]) ?? []) as PublicApiResult<Name>;
-      case "get_goals":
-        return await this.getGoals(session, {
-          status: req.payload?.status as PublicGoalStatus | undefined,
-          category: req.payload?.category as PublicCategory | undefined,
-          deep: Boolean(req.payload?.deep)
-        }) as PublicApiResult<Name>;
-      case "get_goal":
-        return await this.getGoal(session, String(req.payload?.goalTitle ?? ""), req.payload?.depth as number | undefined) as PublicApiResult<Name>;
-      case "get_goal_tasks":
-        return await this.getGoalTasks(session, String(req.payload?.goalTitle ?? "")) as PublicApiResult<Name>;
-      case "get_goal_chat":
-        return await this.getGoalChat(session, String(req.payload?.goalTitle ?? ""), req.payload?.depth as number | undefined) as PublicApiResult<Name>;
-      case "get_desires":
-        return await this.getDesires(session, Boolean(req.payload?.deep)) as PublicApiResult<Name>;
-      case "get_desire":
-        return await this.getDesire(session, String(req.payload?.desireTitle ?? "")) as PublicApiResult<Name>;
+      }
+      case "update_tasks": {
+        const payload = req.payload as PublicApiInputMap["update_tasks"];
+        return await this.updateTasks(session, payload.goalTitle, payload.updates) as PublicApiResult<Name>;
+      }
+      case "get_goals": {
+        const payload = (req.payload as PublicApiInputMap["get_goals"]) ?? {};
+        return await this.getGoals(session, payload) as PublicApiResult<Name>;
+      }
+      case "get_goal": {
+        const payload = req.payload as PublicApiInputMap["get_goal"];
+        return await this.getGoal(session, payload.goalTitle, payload.depth) as PublicApiResult<Name>;
+      }
+      case "get_goal_tasks": {
+        const payload = req.payload as PublicApiInputMap["get_goal_tasks"];
+        return await this.getGoalTasks(session, payload.goalTitle) as PublicApiResult<Name>;
+      }
+      case "get_goal_chat": {
+        const payload = req.payload as PublicApiInputMap["get_goal_chat"];
+        return await this.getGoalChat(session, payload.goalTitle, payload.depth) as PublicApiResult<Name>;
+      }
+      case "get_desires": {
+        const payload = req.payload as PublicApiInputMap["get_desires"] | undefined;
+        return await this.getDesires(session, Boolean(payload?.deep)) as PublicApiResult<Name>;
+      }
+      case "get_desire": {
+        const payload = req.payload as PublicApiInputMap["get_desire"];
+        return await this.getDesire(session, payload.desireTitle) as PublicApiResult<Name>;
+      }
       case "get_state":
         return await this.getState(session) as PublicApiResult<Name>;
       default:
@@ -252,51 +249,51 @@ export class PublicApi {
     }
   }
 
-  private async execInternal(session: SessionContext, name: string, payload?: PrimitivePayload): Promise<unknown> {
-    const result = await this.client.execute({ id: `public-${name}-${Date.now()}`, name: name as any, payload }, session);
+  private async execInternal<Result>(session: SessionContext, name: InternalPrimitiveName, payload?: PrimitivePayload): Promise<Result> {
+    const result = await this.client.execute({ id: `public-${name}-${Date.now()}`, name, payload }, session);
     if (!result.ok) throw new Error(result.error ?? `${name} failed`);
-    return result.result;
+    return result.result as Result;
   }
 
   private async readCoachMessages(session: SessionContext): Promise<string[]> {
-    return await this.execInternal(session, "read_coach_messages") as string[];
+    return this.execInternal<string[]>(session, "read_coach_messages");
   }
 
   private async readGoalChatInternal(session: SessionContext, goalTitle: string): Promise<InternalGoalChatResult> {
-    return await this.execInternal(session, "read_goal_chat", { goalTitle }) as InternalGoalChatResult;
+    return this.execInternal<InternalGoalChatResult>(session, "read_goal_chat", { goalTitle });
   }
 
   private async readGoalFullInternal(session: SessionContext, goalTitle: string): Promise<InternalGoalFullResult> {
-    return await this.execInternal(session, "read_goal_full", { goalTitle }) as InternalGoalFullResult;
+    return this.execInternal<InternalGoalFullResult>(session, "read_goal_full", { goalTitle });
   }
 
   private async readGoalStatusDetailsInternal(session: SessionContext, goalTitle: string): Promise<InternalGoalStatusDetailsResult> {
-    return await this.execInternal(session, "read_goal_status_details", { goalTitle }).catch(() => ({ details: [] })) as InternalGoalStatusDetailsResult;
+    return this.execInternal<InternalGoalStatusDetailsResult>(session, "read_goal_status_details", { goalTitle }).catch(() => ({ details: [] }));
   }
 
   private async listGoalsInternal(session: SessionContext, filter: "active" | "complete" | "archived"): Promise<InternalGoalListResult> {
-    return await this.execInternal(session, "list_goals", { filter }) as InternalGoalListResult;
+    return this.execInternal<InternalGoalListResult>(session, "list_goals", { filter });
   }
 
   private async listGoalTasksInternal(session: SessionContext, goalTitle: string): Promise<InternalGoalTasksResult> {
-    return await this.execInternal(session, "list_goal_tasks", { goalTitle }) as InternalGoalTasksResult;
+    return this.execInternal<InternalGoalTasksResult>(session, "list_goal_tasks", { goalTitle });
   }
 
   private async readLifestormingOverviewInternal(session: SessionContext): Promise<InternalLifestormingOverviewResult> {
-    return await this.execInternal(session, "read_lifestorming_overview") as InternalLifestormingOverviewResult;
+    return this.execInternal<InternalLifestormingOverviewResult>(session, "read_lifestorming_overview");
   }
 
   private async readCachedDesiresInternal(session: SessionContext): Promise<InternalCachedDesiresResult> {
-    return await this.execInternal(session, "read_cached_desires").catch(() => ({ desires: [] })) as InternalCachedDesiresResult;
+    return this.execInternal<InternalCachedDesiresResult>(session, "read_cached_desires").catch(() => ({ desires: [] }));
   }
 
   private async readSensationPracticeInternal(session: SessionContext, desireTitle: string): Promise<InternalSensationPracticeResult> {
-    return await this.execInternal(session, "read_sensation_practice", { desireTitle }) as InternalSensationPracticeResult;
+    return this.execInternal<InternalSensationPracticeResult>(session, "read_sensation_practice", { desireTitle });
   }
 
   private async readLatestNewMessage(
     beforePromise: Promise<string[]>,
-    action: () => Promise<unknown>,
+    action: () => Promise<void>,
     afterPromise: () => Promise<string[]>
   ): Promise<string> {
     const before = await beforePromise.catch((): string[] => []);
@@ -557,11 +554,11 @@ export class PublicApi {
 
   private async getDesire(session: SessionContext, desireTitle: string) {
     const { feltOutTitles } = await this.readDesireSummaries(session);
-    const detail = await this.readSensationPracticeInternal(session, desireTitle);
+      const detail = await this.readSensationPracticeInternal(session, desireTitle);
     const desire: PublicDesireSummary = {
       title: desireTitle,
       feltOut: feltOutTitles.has(desireTitle),
-      category: isPublicCategory(detail?.category) ? detail.category : undefined,
+      category: detail?.category ? requirePublicCategory(detail.category, desireTitle) : undefined,
       sensationPracticeText: typeof detail?.noteText === "string" ? detail.noteText : undefined
     };
     return { desire };

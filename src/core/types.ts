@@ -86,6 +86,13 @@ export type PrimitiveResponse = {
   error?: string;
 };
 
+export type PrimitiveResponseOf<Result> = {
+  id: string;
+  ok: boolean;
+  result?: Result;
+  error?: string;
+};
+
 export type PublicApiResponse<Result = unknown> = {
   id: string;
   ok: boolean;
@@ -307,12 +314,6 @@ export type DiscoverGoalIdsResult = {
   goalIds?: string[];
   waitMs?: number;
   loadingVisible?: boolean;
-};
-
-export type InternalGoalSourceDocsResult = {
-  desireDoc?: unknown;
-  summaryDoc?: unknown;
-  candidateDocs?: Array<{ path: string; result: unknown }>;
 };
 
 export type TaskSuggestionsResult = {

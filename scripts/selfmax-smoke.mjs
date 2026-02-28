@@ -436,9 +436,9 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
   }
 
   const tail = [
-    { id: "12", name: "complete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
-    { id: "13", name: "uncomplete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
-    { id: "14", name: "remove_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
+    { id: "12", name: "complete_task", payload: { goalTitle: taskGoalTitle, taskTexts: [workingTaskText] } },
+    { id: "13", name: "uncomplete_task", payload: { goalTitle: taskGoalTitle, taskTexts: [workingTaskText] } },
+    { id: "14", name: "remove_task", payload: { goalTitle: taskGoalTitle, taskTexts: [workingTaskText] } },
     { id: "15", name: "update_goal", payload: { goalTitle: lifecycleGoalTitle, status: "completed" } },
     { id: "16", name: "update_goal", payload: { goalTitle: lifecycleGoalTitle, status: "active" } }
   ];
@@ -822,32 +822,32 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "start-by-id") {
+    if (args.mode === "open-goal-internal-by-id") {
       const res = await client.execute({ id: "start", name: "start_goal", payload: { goalId: args.goalId ?? "" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
-    if (args.mode === "archive-by-id") {
+    if (args.mode === "set-goal-archived") {
       const res = await client.execute({ id: "archive", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "archived" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
-    if (args.mode === "complete-by-id") {
+    if (args.mode === "set-goal-completed") {
       const res = await client.execute({ id: "complete", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "completed" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
-    if (args.mode === "complete-goal") {
+    if (args.mode === "update-goal-status-completed") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "complete-goal", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "completed" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
-    if (args.mode === "reactivate-goal") {
+    if (args.mode === "update-goal-status-active") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "reactivate-goal", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "active" } }, session);
       console.log(JSON.stringify(summarize(res)));
@@ -923,40 +923,10 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "read-goal") {
-      await ensureLoggedIn(client, session);
-      const res = await client.execute(
-        { id: "read-goal", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
-        session
-      );
-      console.log(JSON.stringify(summarize(res)));
-      return;
-    }
-
-    if (args.mode === "read-goal-metadata") {
-      await ensureLoggedIn(client, session);
-      const res = await client.execute(
-        { id: "read-goal-metadata", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
-        session
-      );
-      console.log(JSON.stringify(summarize(res)));
-      return;
-    }
-
-    if (args.mode === "read-goal-workspace") {
-      await ensureLoggedIn(client, session);
-      const res = await client.execute(
-        { id: "read-goal-workspace", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
-        session
-      );
-      console.log(JSON.stringify(summarize(res)));
-      return;
-    }
-
     if (args.mode === "read-goal-full") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "read-goal-full", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        { id: "read-goal", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -987,7 +957,7 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "read-task-panel-snapshot") {
+    if (args.mode === "read-goal-task-surface") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
         {
@@ -1001,7 +971,7 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "survey-active-goal-task-states") {
+    if (args.mode === "read-active-goal-task-states") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "survey-active-goal-task-states", name: "list_goals", payload: { filter: "active" } }, session);
       console.log(JSON.stringify(summarize(res)));
@@ -1015,20 +985,9 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "list-desires") {
+    if (args.mode === "read-desires-overview") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "list-desires", name: "read_lifestorming_overview" }, session);
-      console.log(JSON.stringify(summarize(res)));
-      return;
-    }
-
-    if (args.mode === "read-desire-category") {
-      throw new Error("read-desire-category removed; use read-sensation-practice or read-lifestorming-overview");
-    }
-
-    if (args.mode === "read-lifestorming-full") {
-      await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "read-lifestorming-full", name: "read_lifestorming_overview" }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -1294,7 +1253,7 @@ async function runClientMode(args) {
       const output = await capturePrimitiveNetwork(client, session, {
         id: "probe-complete-task-network",
         name: "complete_task",
-        payload: { goalTitle: goalTitleToUse, taskText: taskTextToUse }
+        payload: { goalTitle: goalTitleToUse, taskTexts: [taskTextToUse] }
       });
       console.log(JSON.stringify(output));
       return;
@@ -1437,7 +1396,7 @@ async function runClientMode(args) {
     if (args.mode === "read-task-suggestions") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "read-task-suggestions", name: "read_task_suggestions", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        { id: "read-task-suggestions", name: "read_task_suggestions", payload: { goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1447,7 +1406,7 @@ async function runClientMode(args) {
     if (args.mode === "add-tasks") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "add-tasks", name: "add_tasks", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", tasks: [args.task ?? "MVP task"] } },
+        { id: "add-tasks", name: "add_tasks", payload: { goalTitle: args.goalTitle ?? "", tasks: [args.task ?? "MVP task"] } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1457,7 +1416,7 @@ async function runClientMode(args) {
     if (args.mode === "complete-task") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "complete-task", name: "complete_task", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", taskText: args.task ?? "" } },
+        { id: "complete-task", name: "complete_task", payload: { goalTitle: args.goalTitle ?? "", taskTexts: [args.task ?? ""] } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1467,7 +1426,7 @@ async function runClientMode(args) {
     if (args.mode === "uncomplete-task") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "uncomplete-task", name: "uncomplete_task", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", taskText: args.task ?? "" } },
+        { id: "uncomplete-task", name: "uncomplete_task", payload: { goalTitle: args.goalTitle ?? "", taskTexts: [args.task ?? ""] } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1477,7 +1436,7 @@ async function runClientMode(args) {
     if (args.mode === "remove-task") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "remove-task", name: "remove_task", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", taskText: args.task ?? "" } },
+        { id: "remove-task", name: "remove_task", payload: { goalTitle: args.goalTitle ?? "", taskTexts: [args.task ?? ""] } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1489,8 +1448,8 @@ async function runClientMode(args) {
       const res = await client.execute(
         {
           id: "update-goal-due-date",
-          name: "update_goal_due_date",
-          payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", dueDate: args.dueDate ?? nextIsoDate(14) }
+          name: "update_goal",
+          payload: { goalTitle: args.goalTitle ?? "", dueDate: args.dueDate ?? nextIsoDate(14) }
         },
         session
       );
@@ -1859,9 +1818,8 @@ async function runUpdateGoalDueDate(args) {
     const update = await client.execute(
       {
         id: "2",
-        name: "update_goal_due_date",
+        name: "update_goal",
         payload: {
-          goalId: args.goalId ?? "",
           goalTitle: args.goalTitle ?? "",
           dueDate
         }
@@ -1965,14 +1923,13 @@ async function main() {
         "  login              Run login primitive only",
         "  probe              Run login + read_coach_messages probe",
         "  sequence           Run full MVP smoke sequence",
-        "  start-by-id        Start goal by goalId",
-        "  archive-by-id      Archive goal by goalId",
-        "  delete-by-id       Delete goal by goalId",
+        "  open-goal-internal-by-id Open a goal by goalId using the private runtime",
+        "  set-goal-archived  Set a goal status to archived by goalTitle",
+        "  set-goal-completed Set a goal status to completed by goalTitle",
         "  discover-goals     Read-only goal discovery from DOM + stream",
         "  read-goals-overview Read-only goals dashboard snapshot",
         "  route-snapshot     Generic route/url snapshot",
-        "  read-goal          Read goal status blocks (by goalId/title)",
-        "  read-goal-workspace Read visible self-maximize workspace layout",
+        "  read-goal-full     Read consolidated goal workspace state (by goalId/title)",
         "  read-tasks         Read task list for a goal (by goalId/title)",
         "  read-goal-chat     Read goal chat messages (by goalId/title)",
         "  read-understand-overview Read self-awareness hub cards/activity",
@@ -1980,8 +1937,8 @@ async function main() {
         "  read-life-history-assessment Read life-history assessment state",
         "  read-big-five-assessment Read big-five assessment state",
         "  read-lifestorming-overview Read lifestorming landing overview",
-        "  list-desires       Read lifestorming desire buckets/items",
-        "  read-desire-category Read a single lifestorming category panel",
+        "  read-desires-overview Read lifestorming desires from the root page",
+        "  read-goal-task-surface Read goal/task surface via read_goal_full",
         "  keep-open          Login once and keep browser/session open",
         "  goals-list         Login + list goals (and discovered goalIds)",
         "  signin-diagnostic  Run direct /auth sign-in diagnostic",
@@ -1989,12 +1946,12 @@ async function main() {
         "  create-goal-inspect Inspect create-goal UI after pressing NEW GOAL",
         "  create-goal-primitive-inspect Run create_goal primitive and dump resulting UI state",
         "  create-goal-submit-probe Raw create-goal submit + network probe",
-        "  update-goal-due-date Update an existing goal due date by title or id",
+        "  update-goal-due-date Update an existing goal due date by title",
         "  primitive          Run one primitive once with explicit JSON payload",
         "",
         "Options:",
         "  --goal-title <title>   Goal title for sequence mode",
-        "  --goal-id <id>         Goal id for *-by-id modes",
+        "  --goal-id <id>         Goal id for private internal-by-id modes",
         "  --name <primitive>     Primitive name for primitive mode",
         "  --payload-json <json>  JSON payload for primitive mode",
         "  --due-date <yyyy-mm-dd> Due date for create/update goal modes",
@@ -2008,13 +1965,11 @@ async function main() {
         "  node scripts/selfmax-smoke.mjs discover-goals --wait-ms 15000",
         "  node scripts/selfmax-smoke.mjs read-goals-overview",
         "  node scripts/selfmax-smoke.mjs route-snapshot --message goals",
-        "  node scripts/selfmax-smoke.mjs read-goal --goal-id <id>",
-        "  node scripts/selfmax-smoke.mjs read-goal-workspace --goal-id <id>",
-        "  node scripts/selfmax-smoke.mjs read-tasks --goal-id <id>",
+        "  node scripts/selfmax-smoke.mjs read-goal-full --goal-title \"MVP Automation Goal\"",
+        "  node scripts/selfmax-smoke.mjs read-tasks --goal-title \"MVP Automation Goal\"",
         "  node scripts/selfmax-smoke.mjs read-lifestorming-overview",
-        "  node scripts/selfmax-smoke.mjs list-desires",
-        "  node scripts/selfmax-smoke.mjs read-desire-category --message Health",
-        "  node scripts/selfmax-smoke.mjs start-by-id --goal-id <id>",
+        "  node scripts/selfmax-smoke.mjs read-desires-overview",
+        "  node scripts/selfmax-smoke.mjs open-goal-internal-by-id --goal-id <id>",
         "  node scripts/selfmax-smoke.mjs sequence --goal-title \"MVP Automation Goal\" --task \"MVP task A\"",
         "  node scripts/selfmax-smoke.mjs keep-open",
         "  node scripts/selfmax-smoke.mjs signin-diagnostic",

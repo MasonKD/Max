@@ -1,22 +1,25 @@
 import type {
-  PrimitiveName,
-  PrimitiveRequest,
-  SessionContext
+  PrimitiveName
 } from "../core/types.js";
 import type { PrimitiveHandler } from "./primitives-read.js";
 
 export type PrimitiveWriteResult = object;
 
+type CategoryItems = Partial<Record<"Health" | "Work" | "Love" | "Family" | "Social" | "Fun" | "Dreams" | "Meaning", string[]>>;
+type DesireNotesInput = Array<{ title: string; notes: string }>;
+type DesireGoalInput = Array<{ title: string; dueDate: string; goalTitle?: string; goalCategory?: string }>;
+type TaskTextList = string[];
+
 export type WritePrimitiveDependencies = {
   talkToGuide: (message: string) => Promise<PrimitiveWriteResult>;
   talkToGoalChat: (message: string, goalTitle: string) => Promise<PrimitiveWriteResult>;
-  brainstormDesiresForEachCategory: (itemsByCategory: Record<string, unknown>) => Promise<PrimitiveWriteResult>;
-  feelOutDesires: (desires: unknown[]) => Promise<PrimitiveWriteResult>;
-  createGoalsFromDesires: (desires: unknown[]) => Promise<PrimitiveWriteResult>;
+  brainstormDesiresForEachCategory: (itemsByCategory: CategoryItems) => Promise<PrimitiveWriteResult>;
+  feelOutDesires: (desires: DesireNotesInput) => Promise<PrimitiveWriteResult>;
+  createGoalsFromDesires: (desires: DesireGoalInput) => Promise<PrimitiveWriteResult>;
   createGoal: (input: { title: string; category: string; dueDate: string }) => Promise<PrimitiveWriteResult>;
   updateGoal: (goalTitle: string, updates: { status?: "active" | "completed" | "archived"; dueDate?: string }) => Promise<PrimitiveWriteResult>;
   startGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  addTasks: (goalTitle: string | undefined, goalId: string | undefined, tasks: string[], useSuggestions: boolean) => Promise<PrimitiveWriteResult>;
+  addTasks: (goalTitle: string | undefined, goalId: string | undefined, tasks: TaskTextList, useSuggestions: boolean) => Promise<PrimitiveWriteResult>;
   removeTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
   completeTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
   uncompleteTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
@@ -38,6 +41,11 @@ function assertUniqueStrings(values: string[], label: string): void {
   }
 }
 
+function readStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((entry) => String(entry));
+}
+
 export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): Partial<Record<PrimitiveName, PrimitiveHandler>> {
   return {
     talk_to_guide: (req) => deps.talkToGuide(String(req.payload?.message ?? "")),
@@ -47,21 +55,18 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
       return deps.talkToGoalChat(String(req.payload?.message ?? ""), goalTitle);
     },
     brainstorm_desires_for_each_category: (req) => {
-      const itemsByCategory = (req.payload?.itemsByCategory as Record<string, unknown>) ?? {};
+      const itemsByCategory = (req.payload?.itemsByCategory as CategoryItems) ?? {};
       const requestedItems = Object.values(itemsByCategory)
         .flatMap((rawItems) => Array.isArray(rawItems) ? rawItems.map((value) => String(value).trim()).filter((value) => value.length > 0) : []);
       assertUniqueStrings(requestedItems, "desire titles");
       return deps.brainstormDesiresForEachCategory(itemsByCategory);
     },
-    feel_out_desires: (req) => deps.feelOutDesires((req.payload?.desires as unknown[]) ?? []),
+    feel_out_desires: (req) => deps.feelOutDesires((req.payload?.desires as DesireNotesInput) ?? []),
     create_goals_from_desires: (req) => {
-      const desires = (req.payload?.desires as unknown[]) ?? [];
-      const goalTitles = desires.map((entry) => {
-        if (typeof entry === "string") return entry;
-        if (!entry || typeof entry !== "object") return "";
-        const obj = entry as { goalTitle?: unknown; title?: unknown };
-        return String(obj.goalTitle ?? obj.title ?? "");
-      }).filter((value) => value.trim().length > 0);
+      const desires = (req.payload?.desires as DesireGoalInput) ?? [];
+      const goalTitles = desires
+        .map((entry) => String(entry.goalTitle ?? entry.title ?? ""))
+        .filter((value) => value.trim().length > 0);
       assertUniqueStrings(goalTitles, "goal titles");
       return deps.createGoalsFromDesires(desires);
     },
@@ -91,14 +96,14 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
     add_tasks: (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
       if (!goalTitle) throw new Error("add_tasks requires goalTitle");
-      const tasks = ((req.payload?.tasks as unknown[]) ?? []).map((value) => String(value));
+      const tasks = readStringList(req.payload?.tasks);
       assertUniqueStrings(tasks, "task titles within a goal");
       return deps.addTasks(goalTitle, undefined, tasks, false);
     },
     remove_task: async (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
       if (!goalTitle) throw new Error("remove_task requires goalTitle");
-      const taskTexts = ((req.payload?.taskTexts as unknown[]) ?? []).map((value) => String(value));
+      const taskTexts = readStringList(req.payload?.taskTexts);
       assertUniqueStrings(taskTexts, "task titles within a goal");
       if (taskTexts.length === 0) throw new Error("remove_task requires taskTexts");
       const removed: string[] = [];
@@ -111,7 +116,7 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
     complete_task: async (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
       if (!goalTitle) throw new Error("complete_task requires goalTitle");
-      const taskTexts = ((req.payload?.taskTexts as unknown[]) ?? []).map((value) => String(value));
+      const taskTexts = readStringList(req.payload?.taskTexts);
       assertUniqueStrings(taskTexts, "task titles within a goal");
       if (taskTexts.length === 0) throw new Error("complete_task requires taskTexts");
       const completed: string[] = [];
@@ -124,7 +129,7 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
     uncomplete_task: async (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
       if (!goalTitle) throw new Error("uncomplete_task requires goalTitle");
-      const taskTexts = ((req.payload?.taskTexts as unknown[]) ?? []).map((value) => String(value));
+      const taskTexts = readStringList(req.payload?.taskTexts);
       assertUniqueStrings(taskTexts, "task titles within a goal");
       if (taskTexts.length === 0) throw new Error("uncomplete_task requires taskTexts");
       const uncompleted: string[] = [];
