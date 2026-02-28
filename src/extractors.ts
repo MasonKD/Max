@@ -1,4 +1,5 @@
 import type { GoalStatusBlock, GoalSummary, LifestormingSection } from "./types.js";
+import type { TaskItem } from "./types.js";
 
 export function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -257,4 +258,39 @@ export function extractSensationPractice(text: string): {
     actions: lines.filter((line) => /^(SAVE|EXIT|DELETE DESIRE)$/i.test(line)),
     snippet: normalizeWhitespace(text).slice(0, 1000)
   };
+}
+
+export function extractTaskItemsFromGoalPage(text: string): TaskItem[] {
+  const lines = splitVisibleLines(text);
+  const start = lines.findIndex((line) => /^How will you accomplish:/i.test(line));
+  if (start === -1) {
+    return [];
+  }
+
+  const endMarkers = [/^Add new task$/i, /^Use the task suggestion tool$/i, /^Close$/i, /^Tasks are generated based/i];
+  const out: TaskItem[] = [];
+  const seen = new Set<string>();
+
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (endMarkers.some((pattern) => pattern.test(line))) {
+      break;
+    }
+    if (
+      !line ||
+      /^(Current Goal|GOAL STATUS|DESIRE|ENVIRONMENT|MENTALITY|ACTIONS|SITUATION|FEEDBACK|BACK|EDIT|TASKS)$/i.test(line) ||
+      /^How will you accomplish:/i.test(line)
+    ) {
+      continue;
+    }
+
+    const normalized = normalizeWhitespace(line);
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ text: normalized, completed: false });
+  }
+
+  return out;
 }

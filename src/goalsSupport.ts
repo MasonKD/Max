@@ -2,11 +2,12 @@ import type { Locator, Page } from "playwright";
 import { config } from "./config.js";
 import { readBodySnippet } from "./diagnostics.js";
 import { extractGoalWorkspaceSnapshot } from "./goals.js";
+import { extractTaskItemsFromGoalPage } from "./extractors.js";
 import type { SearchRoot } from "./navigation.js";
 import { goalIdFromUrl, normalizeDateInput, titleCase } from "./navigation.js";
 import { StateError } from "./recovery.js";
 import { selectors, textSelectors } from "./selectors.js";
-import type { GoalStatusBlock } from "./types.js";
+import type { GoalStatusBlock, TaskItem } from "./types.js";
 
 export type GoalsSupportDeps = {
   pageOrThrow: () => Page;
@@ -28,7 +29,16 @@ export type GoalsSupportDeps = {
   listGoals: (filter: string) => Promise<{ goals: Array<{ title: string; goalId?: string; taskPanelState?: "tasks_present" | "add_tasks" | "empty"; taskSummaryLabel?: string; taskPreviewItems?: string[] }> }>;
 };
 
+type FirestoreAuthContext = {
+  projectId: string;
+  userId: string;
+  accessToken: string;
+};
+
 export function createGoalsSupport(deps: GoalsSupportDeps) {
+  let firestoreAuthCache: FirestoreAuthContext | null = null;
+  const taskDocIds = new Map<string, string>();
+
   return {
     async getGoalTaskSummary(goalTitle?: string, goalId?: string) {
       if (goalId) {
@@ -56,6 +66,283 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
         taskSummaryLabel: match.taskSummaryLabel,
         taskPreviewItems: match.taskPreviewItems
       };
+    },
+
+    async resolveGoalCard(goalTitle: string): Promise<Locator | null> {
+      const page = deps.pageOrThrow();
+      await deps.ensureOnGoals();
+      const title = page.getByText(goalTitle, { exact: false }).first();
+      if ((await title.count()) === 0) return null;
+
+      const containers = [
+        title.locator("xpath=ancestor::*[self::article or self::section][1]"),
+        title.locator("xpath=ancestor::*[self::div][1]"),
+        title.locator("xpath=ancestor::*[self::div][2]"),
+        title.locator("xpath=ancestor::*[self::div][3]"),
+        title.locator("xpath=ancestor::*[self::div][4]")
+      ];
+
+      for (const container of containers) {
+        if ((await container.count()) === 0) continue;
+        const text = ((await container.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+        if (!text.includes(goalTitle)) continue;
+        if (!/START|Due |tasks completed|No tasks|ADD TASKS/i.test(text)) continue;
+        return container;
+      }
+      return null;
+    },
+
+    async resolveTaskRowInGoalCard(goalTitle: string, taskText: string): Promise<Locator | null> {
+      const card = await this.resolveGoalCard(goalTitle);
+      if (!card) return null;
+      const normalized = normalizeTaskText(taskText);
+
+      const exactSpan = card.locator("span").filter({ hasText: taskText }).first();
+      if ((await exactSpan.count()) > 0) {
+        const row = exactSpan.locator("xpath=ancestor::*[self::div][1]");
+        if ((await row.count()) > 0) return row;
+      }
+
+      const rows = card.locator("div");
+      const count = await rows.count();
+      for (let i = 0; i < count; i += 1) {
+        const row = rows.nth(i);
+        const text = normalizeTaskText(await row.innerText().catch(() => ""));
+        if (!text) continue;
+        if (text !== normalized) continue;
+        const buttons = row.locator("button");
+        if ((await buttons.count()) > 0) return row;
+      }
+
+      return null;
+    },
+
+    async readGoalCardTaskCompletion(goalTitle: string): Promise<{ completed: number; total: number } | null> {
+      const summary = await this.getGoalTaskSummary(goalTitle);
+      const label = summary?.taskSummaryLabel?.trim() ?? "";
+      const match = label.match(/(\d+)\s*\/\s*(\d+)\s*tasks completed/i);
+      if (!match) return null;
+      return { completed: Number(match[1]), total: Number(match[2]) };
+    },
+
+    async waitForGoalCardTaskCompletionDelta(goalTitle: string, previousCompleted: number, delta: number, timeoutMs = 2500): Promise<boolean> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const counts = await this.readGoalCardTaskCompletion(goalTitle);
+        if (counts && counts.completed === previousCompleted + delta) return true;
+        await deps.pageOrThrow().waitForTimeout(200);
+      }
+      return false;
+    },
+
+    async clickGoalCardTaskToggle(goalTitle: string, taskText: string): Promise<boolean> {
+      const row = await this.resolveTaskRowInGoalCard(goalTitle, taskText);
+      if (!row) return false;
+      await row.hover().catch(() => undefined);
+      const buttons = row.locator("button");
+      const count = await buttons.count();
+      if (count === 0) return false;
+      await buttons.first().click({ timeout: 1500 }).catch(() => undefined);
+      return true;
+    },
+
+    async clickGoalCardTaskRemove(goalTitle: string, taskText: string): Promise<boolean> {
+      const row = await this.resolveTaskRowInGoalCard(goalTitle, taskText);
+      if (!row) return false;
+      await row.hover().catch(() => undefined);
+
+      const explicit = row.locator('button[aria-label*="delete" i], button[aria-label*="remove" i], button[aria-label*="trash" i]').first();
+      if ((await explicit.count()) > 0) {
+        await explicit.click({ timeout: 1500 }).catch(() => undefined);
+        return true;
+      }
+
+      const buttons = row.locator("button");
+      const count = await buttons.count();
+      if (count >= 2) {
+        await buttons.nth(1).click({ timeout: 1500 }).catch(() => undefined);
+        return true;
+      }
+
+      return false;
+    },
+
+    async getFirestoreAuthContext(): Promise<FirestoreAuthContext> {
+      if (firestoreAuthCache) return firestoreAuthCache;
+      const page = deps.pageOrThrow();
+      await deps.ensureOnGoals();
+
+      const sessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === "session");
+      if (!sessionCookie?.value) {
+        throw new Error("could not locate selfmax session cookie");
+      }
+
+      const payload = parseJwtPayload(sessionCookie.value);
+      const userId = typeof payload?.user_id === "string" ? payload.user_id : typeof payload?.sub === "string" ? payload.sub : "";
+      const projectId = typeof payload?.aud === "string" ? payload.aud : "";
+      if (!userId || !projectId) {
+        throw new Error("could not derive firestore user/project context from session cookie");
+      }
+
+      const token = await captureFirestoreAccessToken(page);
+      firestoreAuthCache = { projectId, userId, accessToken: token };
+      return firestoreAuthCache;
+    },
+
+    async deleteTaskViaFirestore(goalId: string, taskText: string): Promise<boolean> {
+      const auth = await this.getFirestoreAuthContext();
+      const tempPage = await deps.pageOrThrow().context().newPage();
+      try {
+        await tempPage.goto("about:blank").catch(() => undefined);
+        const cachedDocId = taskDocIds.get(taskDocCacheKey(goalId, taskText));
+        if (cachedDocId) {
+          return await tempPage.evaluate(async ({ projectId, accessToken, userId, docId }) => {
+            const headers = {
+              Authorization: `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            };
+            const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/actions/${docId}`;
+            const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+              method: "POST",
+              headers,
+              body: JSON.stringify({
+                writes: [{ delete: docName }]
+              })
+            });
+            if (!commitRes.ok) {
+              throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
+            }
+            return true;
+          }, { projectId: auth.projectId, accessToken: auth.accessToken, userId: auth.userId, docId: cachedDocId });
+        }
+        return await tempPage.evaluate(async ({ projectId, userId, accessToken, desiredGoalId, desiredTaskText }) => {
+          const headers = {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          };
+          const parent = `projects/${projectId}/databases/(default)/documents/users/${userId}`;
+          const queryRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              structuredQuery: {
+                from: [{ collectionId: "actions" }],
+                where: {
+                  compositeFilter: {
+                    op: "AND",
+                    filters: [
+                      {
+                        fieldFilter: {
+                          field: { fieldPath: "desireId" },
+                          op: "EQUAL",
+                          value: { stringValue: desiredGoalId }
+                        }
+                      },
+                      {
+                        fieldFilter: {
+                          field: { fieldPath: "description" },
+                          op: "EQUAL",
+                          value: { stringValue: desiredTaskText }
+                        }
+                      }
+                    ]
+                  }
+                }
+              },
+              parent
+            })
+          });
+          if (!queryRes.ok) {
+            throw new Error(`runQuery failed (${queryRes.status}): ${await queryRes.text()}`);
+          }
+          const rows = await queryRes.json();
+          const match = Array.isArray(rows) ? rows.find((row) => row?.document?.name) : null;
+          const docName = typeof match?.document?.name === "string" ? match.document.name : "";
+          if (!docName) return false;
+
+          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              writes: [{ delete: docName }]
+            })
+          });
+          if (!commitRes.ok) {
+            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
+          }
+          return true;
+        }, { ...auth, desiredGoalId: goalId, desiredTaskText: taskText });
+      } finally {
+        await tempPage.close().catch(() => undefined);
+      }
+    },
+
+    async updateGoalStatusViaFirestore(goalId: string, status: "active" | "completed" | "archived"): Promise<boolean> {
+      const auth = await this.getFirestoreAuthContext();
+      const tempPage = await deps.pageOrThrow().context().newPage();
+      try {
+        await tempPage.goto("about:blank").catch(() => undefined);
+        return await tempPage.evaluate(async ({ projectId, userId, accessToken, goalId: desiredGoalId, status: nextStatus }) => {
+          const headers = {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          };
+          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/desires/${desiredGoalId}`;
+          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              writes: [
+                {
+                  update: {
+                    name: docName,
+                    fields: {
+                      status: { stringValue: nextStatus }
+                    }
+                  },
+                  updateMask: {
+                    fieldPaths: ["status"]
+                  },
+                  currentDocument: {
+                    exists: true
+                  }
+                }
+              ]
+            })
+          });
+          if (!commitRes.ok) {
+            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
+          }
+          return true;
+        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, goalId, status });
+      } finally {
+        await tempPage.close().catch(() => undefined);
+      }
+    },
+
+    async waitForTaskDocumentWrite(goalId: string, taskText: string, timeoutMs = 4000): Promise<string | null> {
+      const page = deps.pageOrThrow();
+      return new Promise<string | null>((resolve) => {
+        const timeout = setTimeout(() => {
+          page.off("request", onRequest);
+          resolve(null);
+        }, timeoutMs);
+
+        const onRequest = (request: { url: () => string; postData: () => string | null }): void => {
+          const url = request.url();
+          if (!/firestore\.googleapis\.com\/google\.firestore\.v1\.Firestore\/Write\/channel/i.test(url)) return;
+          const body = decodeURIComponent(request.postData() || "");
+          if (!body.includes(taskText)) return;
+          const match = body.match(/documents\/users\/[^/]+\/actions\/([A-Za-z0-9_-]+)/i);
+          if (!match?.[1]) return;
+          clearTimeout(timeout);
+          page.off("request", onRequest);
+          taskDocIds.set(taskDocCacheKey(goalId, taskText), match[1]);
+          resolve(match[1]);
+        };
+
+        page.on("request", onRequest);
+      });
     },
 
     async discoverGoalIds(waitMs?: unknown): Promise<{ goalIds: string[]; waitMs: number; loadingVisible: boolean }> {
@@ -356,16 +643,62 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       ];
       for (const anchor of candidates) {
         if ((await anchor.count()) === 0) continue;
-        const panel = anchor.locator("xpath=ancestor::*[self::section or self::article or self::div][1]");
-        if ((await panel.count()) > 0) return panel;
+        let best: Locator | null = null;
+        let bestLength = -1;
+        for (let depth = 1; depth <= 5; depth += 1) {
+          const panel = anchor.locator(`xpath=ancestor::*[self::section or self::article or self::div][${depth}]`);
+          if ((await panel.count()) === 0) continue;
+          const text = ((await panel.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+          if (!text) continue;
+          if (/GOAL STATUS|CURRENT GOAL|DESIRE|ENVIRONMENT|MENTALITY|ACTIONS|SITUATION|FEEDBACK|Type your message/i.test(text)) {
+            continue;
+          }
+          if (!/How will you accomplish|Select Tasks|Add new task|Use the task suggestion tool/i.test(text)) {
+            continue;
+          }
+          if (text.length > bestLength) {
+            best = panel;
+            bestLength = text.length;
+          }
+        }
+        if (best) return best;
       }
       return null;
     },
 
     async resolveTaskRow(taskText: string): Promise<Locator> {
-      const row = await this.resolveRowByText(taskText);
+      const row = await this.resolveTaskRowWithinPanel(taskText);
       if (!row) throw new Error(`could not locate task row: ${taskText}`);
       return row;
+    },
+
+    async resolveTaskRowWithinPanel(taskText: string): Promise<Locator | null> {
+      const panel = await this.resolveTaskPanel();
+      if (!panel) return null;
+      const normalized = normalizeTaskText(taskText);
+
+      const exactText = panel.getByText(taskText, { exact: true }).first();
+      if ((await exactText.count()) > 0) {
+        return exactText.locator("xpath=ancestor::*[self::li or self::div or self::article or self::section][1]");
+      }
+
+      const exactRow = panel.locator("li, article, section, div").filter({ hasText: taskText }).first();
+      if ((await exactRow.count()) > 0) {
+        return exactRow;
+      }
+
+      const rows = panel.locator("li, article, section, div");
+      const count = await rows.count();
+      for (let i = 0; i < count; i += 1) {
+        const row = rows.nth(i);
+        const text = normalizeTaskText(await row.innerText().catch(() => ""));
+        if (!text) continue;
+        if (text === normalized || text.includes(normalized) || normalized.includes(text)) {
+          return row;
+        }
+      }
+
+      return null;
     },
 
     async resolveRowByText(text: string, required = true): Promise<Locator | null> {
@@ -376,6 +709,57 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
         throw new Error(`could not locate text: ${text}`);
       }
       return node.locator("xpath=ancestor::*[self::div or self::li or self::article or self::section][1]");
+    },
+
+    async readVisibleTaskItems(): Promise<TaskItem[]> {
+      const page = deps.pageOrThrow();
+      const text = await page.locator("body").innerText().catch(() => "");
+      return extractTaskItemsFromGoalPage(text);
+    },
+
+    async waitForTaskToAppear(taskText: string, timeoutMs = 2500): Promise<TaskItem | null> {
+      const normalized = normalizeTaskText(taskText);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const tasks = await this.readVisibleTaskItems();
+        const match = tasks.find((task) => {
+          const candidate = normalizeTaskText(task.text);
+          return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
+        });
+        if (match) return match;
+        await deps.pageOrThrow().waitForTimeout(200);
+      }
+      return null;
+    },
+
+    async waitForTaskState(taskText: string, completed: boolean, timeoutMs = 2500): Promise<TaskItem | null> {
+      const normalized = normalizeTaskText(taskText);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const tasks = await this.readVisibleTaskItems();
+        const match = tasks.find((task) => {
+          const candidate = normalizeTaskText(task.text);
+          return (candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate)) && task.completed === completed;
+        });
+        if (match) return match;
+        await deps.pageOrThrow().waitForTimeout(200);
+      }
+      return null;
+    },
+
+    async waitForTaskToDisappear(taskText: string, timeoutMs = 2500): Promise<boolean> {
+      const normalized = normalizeTaskText(taskText);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const tasks = await this.readVisibleTaskItems();
+        const stillPresent = tasks.some((task) => {
+          const candidate = normalizeTaskText(task.text);
+          return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
+        });
+        if (!stillPresent) return true;
+        await deps.pageOrThrow().waitForTimeout(200);
+      }
+      return false;
     },
 
     async clickGoalCardAction(goalTitle: string, actionTexts: string[]): Promise<void> {
@@ -454,4 +838,66 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
     titleCase,
   };
+}
+
+function normalizeTaskText(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function taskDocCacheKey(goalId: string, taskText: string): string {
+  return `${goalId}:${normalizeTaskText(taskText)}`;
+}
+
+function parseJwtPayload(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length < 2) return null;
+  try {
+    const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+async function captureFirestoreAccessToken(page: Page): Promise<string> {
+  const existing = await page.evaluate(() => document.body.innerText || "").catch(() => "");
+  if (!existing) {
+    await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+  }
+
+  return new Promise<string>(async (resolve, reject) => {
+    const timeout = setTimeout(() => {
+      page.off("request", onRequest);
+      reject(new Error("timed out capturing firestore access token"));
+    }, 8000);
+
+    const onRequest = async (request: { url: () => string; postData: () => string | null; allHeaders?: () => Promise<Record<string, string>>; headers?: () => Record<string, string> }): Promise<void> => {
+      const url = request.url();
+      if (!/firestore\.googleapis\.com/i.test(url)) return;
+      try {
+        const asyncHeaders = typeof request.allHeaders === "function" ? await request.allHeaders() : undefined;
+        const headers = asyncHeaders ?? (typeof request.headers === "function" ? request.headers() : {});
+        const authHeader = headers.authorization ?? headers.Authorization;
+        const authMatch = authHeader?.match(/^Bearer\s+([A-Za-z0-9._-]+)/i);
+        if (authMatch?.[1]) {
+          clearTimeout(timeout);
+          page.off("request", onRequest);
+          resolve(authMatch[1]);
+          return;
+        }
+      } catch {
+      }
+      const body = request.postData() || "";
+      const decoded = decodeURIComponent(body);
+      const match = decoded.match(/Authorization:\s*Bearer\s+([A-Za-z0-9._-]+)/i);
+      if (!match?.[1]) return;
+      clearTimeout(timeout);
+      page.off("request", onRequest);
+      resolve(match[1]);
+    };
+
+    page.on("request", onRequest);
+    await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+  });
 }
