@@ -2,15 +2,17 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
 import { SelfMaxPlaywrightClient } from "./selfmaxClient.js";
-import type { BridgeEnvelope, BusRole, PrimitiveRequest, SessionContext } from "./types.js";
+import type { BridgeEnvelope, BusRole, SessionContext } from "./types.js";
+import { busRoles } from "./types.js";
+import { incomingBridgeEnvelopeSchema } from "./schemas.js";
+import type { IncomingBridgeEnvelope } from "./schemas.js";
+import { ZodError } from "zod";
 
 type ClientCtx = {
   socket: WebSocket;
   role: BusRole;
   session: SessionContext;
 };
-
-const validRoles: readonly BusRole[] = ["openclaw", "selfmax-bot", "end-user"];
 
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ port: config.PORT });
@@ -23,7 +25,7 @@ export class BridgeServer {
     this.wss.on("connection", (socket, req) => {
       const url = new URL(req.url ?? "", `http://${req.headers.host}`);
       const rawRole = url.searchParams.get("role") ?? "openclaw";
-      const role: BusRole = validRoles.includes(rawRole as BusRole) ? (rawRole as BusRole) : "openclaw";
+      const role: BusRole = busRoles.includes(rawRole as BusRole) ? (rawRole as BusRole) : "openclaw";
       const sessionId = url.searchParams.get("sessionId") ?? randomUUID();
       const userId = url.searchParams.get("userId") ?? "anonymous";
 
@@ -38,7 +40,7 @@ export class BridgeServer {
       socket.on("message", async (raw) => {
         try {
           const text = raw.toString("utf-8");
-          const envelope = JSON.parse(text) as BridgeEnvelope;
+          const envelope = incomingBridgeEnvelopeSchema.parse(JSON.parse(text));
           await this.route(client, envelope);
         } catch (error) {
           socket.send(
@@ -47,7 +49,7 @@ export class BridgeServer {
               role: "selfmax-bot",
               correlationId: randomUUID(),
               payload: {
-                error: error instanceof Error ? error.message : "invalid message"
+                error: formatInboundError(error)
               }
             } satisfies BridgeEnvelope)
           );
@@ -65,10 +67,9 @@ export class BridgeServer {
     await this.selfmax.close();
   }
 
-  private async route(sender: ClientCtx, envelope: BridgeEnvelope): Promise<void> {
+  private async route(sender: ClientCtx, envelope: IncomingBridgeEnvelope): Promise<void> {
     if (envelope.type === "primitive") {
-      const req = envelope.payload as unknown as PrimitiveRequest;
-      const res = await this.selfmax.execute(req, sender.session);
+      const res = await this.selfmax.execute(envelope.payload, sender.session);
       sender.socket.send(
         JSON.stringify({
           type: res.ok ? "ack" : "error",
@@ -93,4 +94,11 @@ export class BridgeServer {
       }
     }
   }
+}
+
+function formatInboundError(error: unknown): string {
+  if (error instanceof ZodError) {
+    return `invalid message: ${error.issues.map((issue) => `${issue.path.join(".") || "<root>"} ${issue.message}`).join("; ")}`;
+  }
+  return error instanceof Error ? error.message : "invalid message";
 }

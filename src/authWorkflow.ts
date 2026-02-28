@@ -23,6 +23,30 @@ export type AuthWorkflowDeps = {
 };
 
 export function createAuthWorkflow(deps: AuthWorkflowDeps) {
+  const allowedHosts = new Set([
+    "selfmax.ai",
+    "www.selfmax.ai",
+    new URL(config.SELFMAX_BASE_URL).hostname
+  ]);
+
+  function assertAllowedSelfMaxUrl(rawUrl: string): string {
+    let parsed: URL;
+    try {
+      parsed = new URL(rawUrl);
+    } catch {
+      throw new Error(`invalid explicitUrl: ${rawUrl}`);
+    }
+
+    if (!allowedHosts.has(parsed.hostname)) {
+      throw new Error(`explicitUrl host not allowed: ${parsed.hostname}`);
+    }
+    if (parsed.protocol !== "https:") {
+      throw new Error(`explicitUrl protocol not allowed: ${parsed.protocol}`);
+    }
+
+    return parsed.toString();
+  }
+
   return {
     async login(): Promise<{ loggedIn: boolean; url: string }> {
       const page = deps.ensurePage();
@@ -223,7 +247,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
     }> {
       const page = deps.pageOrThrow();
       if (explicitUrl) {
-        await page.goto(explicitUrl, { waitUntil: "domcontentloaded" });
+        await page.goto(assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" });
       } else if (route) {
         const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
         const path = route.startsWith("/") ? route : `/${route}`;
@@ -258,7 +282,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
     async navigateForRead(route?: string, explicitUrl?: string): Promise<void> {
       const page = deps.pageOrThrow();
       if (explicitUrl) {
-        await page.goto(explicitUrl, { waitUntil: "domcontentloaded" });
+        await page.goto(assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" });
         return;
       }
       if (route && route in knownRoutes) {
