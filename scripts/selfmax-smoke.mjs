@@ -67,6 +67,88 @@ function summarize(result) {
   };
 }
 
+function isActiveGoalLimitError(result) {
+  const message = String(result?.error ?? "");
+  return (
+    /You can only have 10 active goals at a time/i.test(message) ||
+    /create_goal submission did not increase active goal count \(before=10\b/i.test(message)
+  );
+}
+
+async function findSafeGoalTitle(client, session) {
+  const listed = await client.execute({ id: "list-safe-goals", name: "list_goals", payload: { filter: "active" } }, session);
+  if (!listed.ok) {
+    throw new Error(listed.error ?? "list_goals failed while resolving safe goal");
+  }
+  const goals = listed.result?.goals ?? [];
+  const safeGoal = goals.find((goal) => typeof goal?.title === "string" && goal.title.includes("MVP Automation Goal"));
+  if (!safeGoal?.title) {
+    throw new Error("no safe active goal found matching 'MVP Automation Goal'");
+  }
+  return safeGoal.title;
+}
+
+async function runRecoverableSequence(client, session, { goalTitle, task, message, loginFirst = true }) {
+  const steps = [];
+  let workingGoalTitle = goalTitle;
+
+  if (loginFirst) {
+    const loginStep = { id: "1", name: "login" };
+    const loginRes = await client.execute(loginStep, session);
+    steps.push({ step: loginStep.name, ...summarize(loginRes) });
+    if (!loginRes.ok) {
+      return steps;
+    }
+  }
+  const talkStep = { id: "2", name: "talk_to_guide", payload: { message } };
+  const talkRes = await client.execute(talkStep, session);
+  steps.push({ step: talkStep.name, ...summarize(talkRes) });
+  if (!talkRes.ok) {
+    return steps;
+  }
+
+  const createStep = { id: "3", name: "create_goal", payload: { title: goalTitle, category: "Meaning" } };
+  const createRes = await client.execute(createStep, session);
+  steps.push({ step: createStep.name, ...summarize(createRes) });
+
+  if (createRes.ok) {
+    workingGoalTitle = goalTitle;
+  } else if (isActiveGoalLimitError(createRes)) {
+    workingGoalTitle = await findSafeGoalTitle(client, session);
+    steps.push({
+      step: "sequence_recovery",
+      id: "3r",
+      ok: true,
+      error: null,
+      result: {
+        reason: "active_goal_limit",
+        usingExistingGoalTitle: workingGoalTitle
+      }
+    });
+  } else {
+    return steps;
+  }
+
+  const followup = [
+    { id: "4", name: "start_goal", payload: { goalTitle: workingGoalTitle } },
+    { id: "5", name: "add_tasks", payload: { goalTitle: workingGoalTitle, tasks: [task] } },
+    { id: "6", name: "complete_task", payload: { goalTitle: workingGoalTitle, taskText: task } },
+    { id: "7", name: "uncomplete_task", payload: { goalTitle: workingGoalTitle, taskText: task } },
+    { id: "8", name: "remove_task", payload: { goalTitle: workingGoalTitle, taskText: task } },
+    { id: "9", name: "archive_goal", payload: { goalTitle: workingGoalTitle } }
+  ];
+
+  for (const step of followup) {
+    const res = await client.execute(step, session);
+    steps.push({ step: step.name, ...summarize(res) });
+    if (!res.ok) {
+      break;
+    }
+  }
+
+  return steps;
+}
+
 async function ensureLoggedIn(client, session) {
   const login = await client.execute({ id: "login", name: "login" }, session);
   if (!login.ok) {
@@ -101,24 +183,9 @@ async function runClientMode(args) {
     }
 
     if (args.mode === "sequence") {
-      const steps = [
-        { id: "1", name: "login" },
-        { id: "2", name: "talk_to_guide", payload: { message } },
-        { id: "3", name: "create_goal", payload: { title: goalTitle, category: "Meaning" } },
-        { id: "4", name: "start_goal", payload: {} },
-        { id: "5", name: "add_tasks", payload: { tasks: [task] } },
-        { id: "6", name: "complete_task", payload: { taskText: task } },
-        { id: "7", name: "uncomplete_task", payload: { taskText: task } },
-        { id: "8", name: "remove_task", payload: { taskText: task } },
-        { id: "9", name: "archive_goal", payload: {} }
-      ];
-
-      for (const step of steps) {
-        const res = await client.execute(step, session);
-        console.log(JSON.stringify({ step: step.name, ...summarize(res) }));
-        if (!res.ok) {
-          break;
-        }
+      const results = await runRecoverableSequence(client, session, { goalTitle, task, message, loginFirst: true });
+      for (const row of results) {
+        console.log(JSON.stringify(row));
       }
       return;
     }
@@ -404,22 +471,9 @@ async function runKeepOpenMode(args) {
       if (line.toLowerCase() === "sequence") {
         sequenceRound += 1;
         const goalTitle = `${goalTitleBase} ${new Date().toISOString().replace(/[:.]/g, "-")}-${sequenceRound}`;
-        const baseSequence = [
-          { id: "2", name: "talk_to_guide", payload: { message } },
-          { id: "3", name: "create_goal", payload: { title: goalTitle, category: "Meaning" } },
-          { id: "4", name: "start_goal", payload: {} },
-          { id: "5", name: "add_tasks", payload: { tasks: [task] } },
-          { id: "6", name: "complete_task", payload: { taskText: task } },
-          { id: "7", name: "uncomplete_task", payload: { taskText: task } },
-          { id: "8", name: "remove_task", payload: { taskText: task } },
-          { id: "9", name: "archive_goal", payload: {} }
-        ];
-        for (const step of baseSequence) {
-          const res = await client.execute(step, session);
-          console.log(JSON.stringify({ step: step.name, ...summarize(res) }));
-          if (!res.ok) {
-            break;
-          }
+        const results = await runRecoverableSequence(client, session, { goalTitle, task, message, loginFirst: false });
+        for (const row of results) {
+          console.log(JSON.stringify(row));
         }
         continue;
       }

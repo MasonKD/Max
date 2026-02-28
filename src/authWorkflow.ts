@@ -1,0 +1,316 @@
+import type { Locator, Page } from "playwright";
+import type { AuthState, SessionContext } from "./types.js";
+import { config } from "./config.js";
+import { selectors, cssSelectors } from "./selectors.js";
+import { AuthError } from "./recovery.js";
+import { matchKnownRoute, extractRouteParams, type SearchRoot } from "./navigation.js";
+import { readRouteSnapshotDiagnostic, readPageSectionsDiagnostic, discoverLinksDiagnostic } from "./diagnostics.js";
+import { knownRoutes, knownActions, actionById, type KnownActionId, type KnownRouteId } from "./catalog.js";
+
+export type AuthWorkflowDeps = {
+  ensurePage: () => Page;
+  pageOrThrow: () => Page;
+  persistAuthState: () => Promise<void>;
+  isGoalsWorkspaceVisible: () => Promise<boolean>;
+  ensureGoalsWorkspaceVisible: () => Promise<void>;
+  resolveFirstVisible: (page: Page, selectors: string[]) => Promise<Locator>;
+  tryClickByCss: (root: SearchRoot, selectors: string[], scope?: Locator) => Promise<boolean>;
+  tryClickByText: (root: SearchRoot, texts: string[], scope?: Locator) => Promise<boolean>;
+  resolveChatInput: () => Promise<Locator>;
+  storageKeyFor: (session: SessionContext) => string;
+  readGoalCount: (label: "Active" | "Complete" | "Archived" | "All") => Promise<number | null>;
+  sessionGate: { isReady: () => boolean; markReady: () => void };
+};
+
+export function createAuthWorkflow(deps: AuthWorkflowDeps) {
+  return {
+    async login(): Promise<{ loggedIn: boolean; url: string }> {
+      const page = deps.ensurePage();
+      const authUrl = `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/auth?mode=sign-in&v=b`;
+      const goalsUrl = `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`;
+      let lastError: Error | null = null;
+
+      await page.goto(goalsUrl, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+      if (await deps.isGoalsWorkspaceVisible()) {
+        deps.sessionGate.markReady();
+        await deps.persistAuthState();
+        return { loggedIn: true, url: page.url() };
+      }
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          await page.goto(authUrl, { waitUntil: "domcontentloaded" });
+
+          const emailInput = await deps.resolveFirstVisible(page, [
+            config.LOGIN_EMAIL_SELECTOR,
+            ...cssSelectors(selectors.auth.emailInput)
+          ]);
+          await emailInput.fill(config.SELFMAX_EMAIL);
+
+          const passwordInput = await deps.resolveFirstVisible(page, [
+            config.LOGIN_PASSWORD_SELECTOR,
+            ...cssSelectors(selectors.auth.passwordInput)
+          ]);
+          await passwordInput.fill(config.SELFMAX_PASSWORD);
+
+          const exactSignIn = page.getByRole("button", { name: /^sign in$/i }).first();
+          let submitted = false;
+          if ((await exactSignIn.count()) > 0 && (await exactSignIn.isVisible().catch(() => false))) {
+            await exactSignIn.click({ timeout: 1500 });
+            submitted = true;
+          }
+          if (!submitted) {
+            submitted = await deps.tryClickByCss(page, [config.LOGIN_SUBMIT_SELECTOR, ...cssSelectors(selectors.auth.submitButtons)]);
+          }
+          if (!submitted) {
+            throw new AuthError("could not submit login form", {
+              action: "inspect auth selectors",
+              detail: "submit button did not match primary or fallback selectors"
+            });
+          }
+
+          await Promise.race([
+            page.waitForURL(/\/goals(\?|$)/, { timeout: 5000 }),
+            page.waitForLoadState("domcontentloaded", { timeout: 5000 })
+          ]).catch(() => undefined);
+
+          if (/\/auth(\?|$)/.test(page.url())) {
+            await passwordInput.press("Enter").catch(() => undefined);
+            if (await deps.tryClickByCss(page, ['button[type="submit"]'])) {
+              await Promise.race([
+                page.waitForURL(/\/goals(\?|$)/, { timeout: 4000 }),
+                page.waitForLoadState("domcontentloaded", { timeout: 4000 })
+              ]).catch(() => undefined);
+            }
+          }
+
+          let reachedGoals = false;
+          for (let i = 0; i < 2; i += 1) {
+            await page.goto(goalsUrl, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+            try {
+              await deps.ensureGoalsWorkspaceVisible();
+              reachedGoals = true;
+              break;
+            } catch (error) {
+              lastError = error instanceof Error ? error : new Error(String(error));
+              await page.waitForTimeout(500);
+            }
+          }
+
+          if (reachedGoals) {
+            deps.sessionGate.markReady();
+            await deps.persistAuthState();
+            return { loggedIn: true, url: page.url() };
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error : new Error(String(error));
+        }
+
+        await page.waitForTimeout(500);
+      }
+
+      throw lastError ?? new AuthError("login failed after retries", {
+        action: "re-authenticate in a long-lived session",
+        detail: "storage state did not restore a valid goals workspace"
+      });
+    },
+
+    async setState(session: SessionContext, patch: Record<string, unknown>): Promise<Record<string, unknown>> {
+      const page = deps.ensurePage();
+      const key = deps.storageKeyFor(session);
+      return page.evaluate(
+        ({ storageKey, incoming }) => {
+          const currentRaw = window.localStorage.getItem(storageKey);
+          const current = currentRaw ? JSON.parse(currentRaw) : {};
+          const next = {
+            ...current,
+            ...incoming,
+            updatedAt: new Date().toISOString()
+          };
+          window.localStorage.setItem(storageKey, JSON.stringify(next));
+          return next;
+        },
+        { storageKey: key, incoming: patch }
+      );
+    },
+
+    async getState(session: SessionContext): Promise<Record<string, unknown>> {
+      const page = deps.ensurePage();
+      const key = deps.storageKeyFor(session);
+      return page.evaluate((storageKey) => {
+        const raw = window.localStorage.getItem(storageKey);
+        return raw ? JSON.parse(raw) : {};
+      }, key);
+    },
+
+    async talkToGuide(message: string): Promise<{ sent: boolean }> {
+      await this.ensureOnGoals();
+      return this.sendCoachMessage(message);
+    },
+
+    async talkToGoalChat(message: string, goalTitle: string | undefined, openGoalContext: (goalTitle: string) => Promise<void>): Promise<{ sent: boolean; goalTitle?: string }> {
+      if (goalTitle) {
+        await openGoalContext(goalTitle);
+      } else {
+        await this.ensureOnGoals();
+      }
+      await this.sendCoachMessage(message);
+      return { sent: true, goalTitle };
+    },
+
+    async sendCoachMessage(message: string): Promise<{ sent: boolean }> {
+      if (!message.trim()) {
+        throw new Error("message is required");
+      }
+      const input = await deps.resolveChatInput();
+      await input.fill(message);
+      const sent = await deps.tryClickByText(deps.pageOrThrow(), ["Send", "GO", "submit"], input.locator("xpath=ancestor::*[self::form or self::div][1]"));
+      if (!sent) {
+        await input.press("Meta+Enter");
+      }
+      return { sent: true };
+    },
+
+    async readCoachMessages(): Promise<string[]> {
+      const page = deps.ensurePage();
+      const byConfiguredSelector = page.locator(config.COACH_MESSAGE_SELECTOR);
+      if ((await byConfiguredSelector.count()) > 0) {
+        return byConfiguredSelector
+          .allTextContents()
+          .then((messages) => messages.map((m) => m.trim()).filter((m) => m.length > 0));
+      }
+
+      const generic = page.locator('[class*="message"], [data-role*="message"], [data-testid*="message"]');
+      if ((await generic.count()) === 0) {
+        return [];
+      }
+
+      const messages = await generic.allTextContents();
+      return messages.map((m) => m.trim()).filter((m) => m.length > 0);
+    },
+
+    async readAuthState(): Promise<AuthState> {
+      const archivedCount = await deps.readGoalCount("Archived");
+      const activeCount = await deps.readGoalCount("Active");
+      const completeCount = await deps.readGoalCount("Complete");
+      const allCount = await deps.readGoalCount("All");
+      return {
+        valid: await deps.isGoalsWorkspaceVisible(),
+        archivedCount,
+        activeCount,
+        completeCount,
+        allCount
+      };
+    },
+
+    async readCurrentRoute(): Promise<{ url: string; routeId?: KnownRouteId; params: Record<string, string> }> {
+      const page = deps.pageOrThrow();
+      const url = page.url();
+      return { url, routeId: matchKnownRoute(url), params: extractRouteParams(url) };
+    },
+
+    async readKnownRoutes(): Promise<typeof knownRoutes> {
+      return knownRoutes;
+    },
+
+    async readRouteSnapshot(route?: string, explicitUrl?: string): Promise<{
+      url: string;
+      auth?: AuthState;
+      headingCandidates: string[];
+      buttonTexts: string[];
+      inputPlaceholders: string[];
+      snippet: string;
+    }> {
+      const page = deps.pageOrThrow();
+      if (explicitUrl) {
+        await page.goto(explicitUrl, { waitUntil: "domcontentloaded" });
+      } else if (route) {
+        const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
+        const path = route.startsWith("/") ? route : `/${route}`;
+        await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
+      }
+      const onGoals = /\/goals(\?|$)/.test(page.url());
+      return readRouteSnapshotDiagnostic(page, onGoals ? await this.readAuthState() : undefined);
+    },
+
+    async readPageSections(route: string | undefined, explicitUrl: string | undefined, navigateForRead: (route?: string, explicitUrl?: string) => Promise<void>) {
+      const page = deps.pageOrThrow();
+      await navigateForRead(route, explicitUrl);
+      return readPageSectionsDiagnostic(page);
+    },
+
+    async discoverLinks(route: string | undefined, explicitUrl: string | undefined, navigateForRead: (route?: string, explicitUrl?: string) => Promise<void>) {
+      const page = deps.pageOrThrow();
+      await navigateForRead(route, explicitUrl);
+      return discoverLinksDiagnostic(page);
+    },
+
+    async navigate(route: KnownRouteId): Promise<{ route: KnownRouteId; url: string }> {
+      const page = deps.ensurePage();
+      const url = knownRoutes[route];
+      if (!url) {
+        throw new Error(`unknown route: ${route}`);
+      }
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      return { route, url: page.url() };
+    },
+
+    async navigateForRead(route?: string, explicitUrl?: string): Promise<void> {
+      const page = deps.pageOrThrow();
+      if (explicitUrl) {
+        await page.goto(explicitUrl, { waitUntil: "domcontentloaded" });
+        return;
+      }
+      if (route && route in knownRoutes) {
+        await this.navigate(route as KnownRouteId);
+        return;
+      }
+      if (route) {
+        const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
+        const path = route.startsWith("/") ? route : `/${route}`;
+        await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
+      }
+    },
+
+    async listKnownActions(route: KnownRouteId | null): Promise<typeof knownActions> {
+      if (!route) {
+        return [...knownActions];
+      }
+      return knownActions.filter((action) => action.route === route);
+    },
+
+    async invokeKnownAction(payload: Record<string, unknown>): Promise<{ invoked: KnownActionId }> {
+      const page = deps.ensurePage();
+      const actionId = payload.actionId as KnownActionId | undefined;
+      if (!actionId) {
+        throw new Error("payload.actionId is required");
+      }
+      const action = actionById.get(actionId);
+      if (!action) {
+        throw new Error(`unknown actionId: ${actionId}`);
+      }
+      const message = payload.message;
+      if (typeof message === "string" && action.id === "goals.send_guide_message") {
+        const input = await deps.resolveChatInput();
+        await input.fill(message);
+      }
+      await page.click(action.selector);
+      return { invoked: action.id };
+    },
+
+    async ensureOnGoals(): Promise<void> {
+      const page = deps.pageOrThrow();
+      if (page.url().includes("/goals") && (deps.sessionGate.isReady() || (await deps.isGoalsWorkspaceVisible()))) {
+        if (!deps.sessionGate.isReady()) {
+          deps.sessionGate.markReady();
+        }
+        return;
+      }
+      await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" });
+      if (!deps.sessionGate.isReady()) {
+        await deps.ensureGoalsWorkspaceVisible();
+        deps.sessionGate.markReady();
+      }
+    }
+  };
+}
