@@ -19,8 +19,6 @@ export type LifestormingWorkflowDeps = {
   waitForDesiresCategory: (category: string, timeoutMs?: number, page?: Page) => Promise<void>;
   cacheDesire: (entry: { desireId: string; title?: string; category?: string }) => void;
   findDesireIdByTitle: (title: string) => string | undefined;
-  readDesireSourceDoc: (desireId: string) => Promise<unknown>;
-  updateDesireNotesViaFirestore: (desireId: string, notes: string) => Promise<boolean>;
   entityDesires: () => Record<string, DesireCacheEntry>;
 };
 
@@ -128,9 +126,6 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
           await notes.fill(desire.notes);
         }
         await deps.tryClickByText(page, ["SAVE", "Save"]);
-        if (desireId) {
-          await deps.updateDesireNotesViaFirestore(desireId, desire.notes).catch(() => undefined);
-        }
         await page.waitForTimeout(1500);
         processed.push(desire);
       }
@@ -254,14 +249,6 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       const result = extractSensationPractice(await page.locator("body").innerText().catch(() => ""));
       let noteText = await page.locator("textarea").first().inputValue().catch(() => "");
       const resolvedDesireId = desireId ?? extractRouteParams(page.url()).desireId;
-      if ((!noteText || noteText.trim().length === 0) && resolvedDesireId) {
-        const docs = await deps.readDesireSourceDoc(resolvedDesireId).catch(() => null) as { desireDoc?: { fields?: Record<string, unknown> } } | null;
-        const rawNotes = docs?.desireDoc?.fields?.notes;
-        if (typeof rawNotes === "string") noteText = rawNotes;
-        else if (rawNotes && typeof rawNotes === "object" && "stringValue" in (rawNotes as Record<string, unknown>) && typeof (rawNotes as Record<string, unknown>).stringValue === "string") {
-          noteText = String((rawNotes as Record<string, unknown>).stringValue);
-        }
-      }
       if (resolvedDesireId && result.title && !/Desire not found\.?/i.test(result.title)) {
         deps.cacheDesire({ desireId: resolvedDesireId, title: desireTitle ?? result.title, category: result.category });
       }

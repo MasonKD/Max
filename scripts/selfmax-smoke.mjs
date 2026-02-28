@@ -663,7 +663,7 @@ async function capturePrimitiveNetwork(client, session, req) {
   const events = [];
   const onRequest = (request) => {
     const url = request.url();
-    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    if (!/selfmax\.ai|api/i.test(url)) return;
     events.push({
       type: "request",
       method: request.method(),
@@ -673,7 +673,7 @@ async function capturePrimitiveNetwork(client, session, req) {
   };
   const onResponse = async (response) => {
     const url = response.url();
-    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    if (!/selfmax\.ai|api/i.test(url)) return;
     let body;
     try {
       body = await response.text();
@@ -703,7 +703,7 @@ async function captureContextNetwork(context, fn) {
   const events = [];
   const onRequest = (request) => {
     const url = request.url();
-    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    if (!/selfmax\.ai|api/i.test(url)) return;
     events.push({
       type: "request",
       method: request.method(),
@@ -713,7 +713,7 @@ async function captureContextNetwork(context, fn) {
   };
   const onResponse = async (response) => {
     const url = response.url();
-    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    if (!/selfmax\.ai|api/i.test(url)) return;
     let body;
     try {
       body = await response.text();
@@ -735,32 +735,6 @@ async function captureContextNetwork(context, fn) {
   } finally {
     context.off("request", onRequest);
     context.off("response", onResponse);
-  }
-}
-
-async function captureGoalsListenTraffic(client, session, waitMs = 4000) {
-  await ensureLoggedIn(client, session);
-  const page = client.page ?? client["page"];
-  if (!page) {
-    throw new Error("page unavailable");
-  }
-  const events = [];
-  const onResponse = async (response) => {
-    const url = response.url();
-    if (!/firestore\.googleapis\.com\/google\.firestore\.v1\.Firestore\/Listen\/channel/i.test(url)) return;
-    try {
-      const body = await response.text();
-      events.push({ url, body: body.slice(0, 20000) });
-    } catch {
-    }
-  };
-  page.on("response", onResponse);
-  try {
-    await page.goto("https://www.selfmax.ai/goals", { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(waitMs);
-    return events;
-  } finally {
-    page.off("response", onResponse);
   }
 }
 
@@ -1395,36 +1369,6 @@ async function runClientMode(args) {
       return;
     }
 
-    if (args.mode === "probe-status-change-network") {
-      const goalTitleToUse = args.goalTitle ?? "";
-      const goalIdToUse = args.goalId ?? "";
-      const statusToUse = (args.status ?? "").toLowerCase();
-      if (!goalTitleToUse || !goalIdToUse || !/^(active|completed|archived)$/.test(statusToUse)) {
-        throw new Error("probe-status-change-network requires --goal-title, --goal-id, and --status active|completed|archived");
-      }
-      await ensureLoggedIn(client, session);
-      const context = client.context ?? client["context"];
-      if (!context) {
-        throw new Error("context unavailable");
-      }
-      const output = await captureContextNetwork(context, async () => {
-        const page = await openGoalWorkspaceStatus(client, session, goalTitleToUse, goalIdToUse);
-        const label = statusToUse === "completed" ? /Mark as Completed/i : statusToUse === "archived" ? /Archive Goal/i : /Mark as Active/i;
-        const item = page.locator('[role="menuitem"]').filter({ hasText: label }).first();
-        if ((await item.count()) > 0 && (await item.isVisible().catch(() => false))) {
-          await item.click({ timeout: 2000 });
-        } else {
-          await page.getByText(label).last().click({ timeout: 2000 });
-        }
-        await page.waitForTimeout(1500);
-        const support = client.goalsSupport ?? client["goalsSupport"];
-        const docs = await support.readGoalFirestoreDocuments(goalIdToUse);
-        return { docs };
-      });
-      console.log(JSON.stringify(output));
-      return;
-    }
-
     if (args.mode === "probe-sensation-save-network") {
       const title = args.desireTitle ?? "";
       if (!title) {
@@ -1474,41 +1418,6 @@ async function runClientMode(args) {
         return { url: page.url(), text: await page.locator("body").innerText().catch(() => "") };
       });
       console.log(JSON.stringify(output));
-      return;
-    }
-
-    if (args.mode === "probe-goal-docs") {
-      await ensureLoggedIn(client, session);
-      const goalIdToUse = args.goalId ?? "";
-      if (!goalIdToUse) {
-        throw new Error("probe-goal-docs requires --goal-id");
-      }
-      const support = client.goalsSupport ?? client["goalsSupport"];
-      if (!support || typeof support.readGoalFirestoreDocuments !== "function") {
-        console.log(JSON.stringify({ supportKeys: support ? Object.keys(support) : null }));
-        throw new Error("goalsSupport.readGoalFirestoreDocuments unavailable");
-      }
-      const docs = await support.readGoalFirestoreDocuments(goalIdToUse);
-      console.log(JSON.stringify(docs));
-      return;
-    }
-
-    if (args.mode === "probe-desire-doc") {
-      await ensureLoggedIn(client, session);
-      const desireIdToUse = args.desireId ?? "";
-      if (!desireIdToUse) {
-        throw new Error("probe-desire-doc requires --desire-id");
-      }
-      const support = client.goalsSupport ?? client["goalsSupport"];
-      const auth = await support.getFirestoreAuthContext();
-      const doc = await support.readFirestoreDocument(`users/${auth.userId}/lifestormDesires/${desireIdToUse}`);
-      console.log(JSON.stringify(doc));
-      return;
-    }
-
-    if (args.mode === "probe-goals-listen") {
-      const events = await captureGoalsListenTraffic(client, session, args.waitMs ?? 4000);
-      console.log(JSON.stringify(events));
       return;
     }
 
@@ -2045,7 +1954,7 @@ async function runCreateGoalSubmitProbe(args) {
     let createPost = null;
     page.on("requestfinished", async (req) => {
       const url = req.url();
-      if (!/goal|selfmax|firebase|api/i.test(url)) return;
+      if (!/goal|selfmax|api/i.test(url)) return;
       const res = await req.response();
       const item = { type: "finished", url, method: req.method(), status: res?.status() ?? null };
       network.push(item);
@@ -2061,7 +1970,7 @@ async function runCreateGoalSubmitProbe(args) {
     });
     page.on("requestfailed", (req) => {
       const url = req.url();
-      if (!/goal|selfmax|firebase|api/i.test(url)) return;
+      if (!/goal|selfmax|api/i.test(url)) return;
       network.push({ type: "failed", url, method: req.method(), failure: req.failure()?.errorText ?? "unknown" });
     });
 
@@ -2116,7 +2025,6 @@ async function main() {
         "  read-desire-category Read a single lifestorming category panel",
         "  keep-open          Login once and keep browser/session open",
         "  goals-list         Login + list goals (and discovered goalIds)",
-        "  goals-discover-ids Discover goalIds from Firestore listen stream",
         "  signin-diagnostic  Run direct /auth sign-in diagnostic",
         "  goals-inspect      Dump action/link snapshot from /goals",
         "  create-goal-inspect Inspect create-goal UI after pressing NEW GOAL",
@@ -2138,7 +2046,6 @@ async function main() {
         "Examples:",
         "  node scripts/selfmax-smoke.mjs login",
         "  node scripts/selfmax-smoke.mjs goals-list",
-        "  node scripts/selfmax-smoke.mjs goals-discover-ids",
         "  node scripts/selfmax-smoke.mjs discover-goals --wait-ms 15000",
         "  node scripts/selfmax-smoke.mjs read-goals-overview",
         "  node scripts/selfmax-smoke.mjs route-snapshot --message goals",
@@ -2180,21 +2087,6 @@ async function main() {
         session
       );
       console.log(JSON.stringify({ login: summarize(login), list: summarize(list) }));
-      return;
-    } finally {
-      await client.close().catch(() => undefined);
-    }
-  }
-
-  if (args.mode === "goals-discover-ids") {
-    const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
-    const client = new SelfMaxPlaywrightClient();
-    const session = { sessionId: "smoke-session", userId: "smoke-user" };
-    try {
-      await client.init();
-      const login = await client.execute({ id: "1", name: "login" }, session);
-      const ids = await client.execute({ id: "2", name: "discover_goal_ids" }, session);
-      console.log(JSON.stringify({ login: summarize(login), ids: summarize(ids) }));
       return;
     } finally {
       await client.close().catch(() => undefined);

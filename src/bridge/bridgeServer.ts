@@ -25,6 +25,10 @@ export class BridgeServer {
     await this.selfmax.init();
 
     this.wss.on("connection", (socket, req) => {
+      if (!isLoopbackAddress(req.socket.remoteAddress)) {
+        socket.close(1008, "local connections only");
+        return;
+      }
       const url = new URL(req.url ?? "", `http://${req.headers.host}`);
       const rawRole = url.searchParams.get("role") ?? "openclaw";
       const role: BusRole = busRoles.includes(rawRole as BusRole) ? (rawRole as BusRole) : "openclaw";
@@ -101,18 +105,23 @@ export class BridgeServer {
     }
 
     if (envelope.type === "message") {
-      const peers = [...this.clients].filter(
-        (client) =>
-          client !== sender &&
-          client.session.sessionId === sender.session.sessionId &&
-          client.session.userId === sender.session.userId
+      sender.socket.send(
+        JSON.stringify({
+          type: "error",
+          role: "selfmax-bot",
+          correlationId: envelope.correlationId,
+          payload: {
+            error: "message passthrough is disabled in local-only mode"
+          }
+        } satisfies BridgeEnvelope)
       );
-
-      for (const peer of peers) {
-        peer.socket.send(JSON.stringify(envelope));
-      }
     }
   }
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === "::1" || address === "127.0.0.1" || address === "::ffff:127.0.0.1";
 }
 
 function formatInboundError(error: unknown): string {

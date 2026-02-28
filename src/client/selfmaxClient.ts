@@ -74,7 +74,6 @@ export class SelfMaxPlaywrightClient {
     cacheGoal: (entry: { goalId: string; title?: string; category?: string; dueLabel?: string; progressLabel?: string; taskPanelState?: "tasks_present" | "add_tasks" | "empty"; taskSummaryLabel?: string; taskPreviewItems?: string[] }) => cacheGoal(this.entityCache, entry),
     findGoalIdByTitle: (title: string) => findGoalIdByTitle(this.entityCache, title),
     listGoalIdsFromPage: () => this.goalsSupport.listGoalIdsFromPage(),
-    discoverGoalIds: (waitMs?: unknown) => this.goalsSupport.discoverGoalIds(waitMs),
     tryOpenAnyGoalByLink: () => this.goalsSupport.tryOpenAnyGoalByLink(),
     tryClickStartInGoalsList: () => this.goalsSupport.tryClickStartInGoalsList(),
     tryClickGoalCardAction: (goalTitle: string, actionTexts: string[]) => this.goalsSupport.tryClickGoalCardAction(goalTitle, actionTexts),
@@ -97,17 +96,14 @@ export class SelfMaxPlaywrightClient {
     waitForGoalCardTaskCompletionDelta: (goalTitle: string, previousCompleted: number, delta: number, timeoutMs?: number) => this.goalsSupport.waitForGoalCardTaskCompletionDelta(goalTitle, previousCompleted, delta, timeoutMs),
     clickGoalCardTaskToggle: (goalTitle: string, taskText: string) => this.goalsSupport.clickGoalCardTaskToggle(goalTitle, taskText),
     clickGoalCardTaskRemove: (goalTitle: string, taskText: string) => this.goalsSupport.clickGoalCardTaskRemove(goalTitle, taskText),
-    deleteTaskViaFirestore: (goalId: string, taskText: string) => this.goalsSupport.deleteTaskViaFirestore(goalId, taskText),
-    waitForTaskDocumentWrite: (goalId: string, taskText: string, timeoutMs?: number) => this.goalsSupport.waitForTaskDocumentWrite(goalId, taskText, timeoutMs),
-    updateGoalStatusViaFirestore: (goalId: string, status: "active" | "completed" | "archived") => this.goalsSupport.updateGoalStatusViaFirestore(goalId, status),
-    updateGoalDueDateViaFirestore: (goalId: string, dueDateIso: string) => this.goalsSupport.updateGoalDueDateViaFirestore(goalId, dueDateIso),
-    readGoalSourceDocs: (goalId: string) => this.goalsSupport.readGoalFirestoreDocuments(goalId),
     entityGoals: () => this.entityCache.goalsById,
     isGoalContextOpen: (goalTitle?: string) => this.goalsSupport.isGoalContextOpen(goalTitle),
     tryPromoteDesireToGoal: (desireTitle: string) => this.lifestormingWorkflow.tryPromoteDesireToGoal(desireTitle),
     updateGoalDueDateFromGoals: (goalTitle: string, dueDateInput: string) => this.goalsSupport.updateGoalDueDateFromGoals(goalTitle, dueDateInput),
     formatGoalDueLabel: (input: string) => this.goalsSupport.formatGoalDueLabel(input),
-    waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => this.goalsSupport.waitForGoalDueLabel(goalTitle, expectedLabel, timeoutMs)
+    waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => this.goalsSupport.waitForGoalDueLabel(goalTitle, expectedLabel, timeoutMs),
+    openGoalEditPanel: () => this.goalsSupport.openGoalEditPanel(),
+    clickGoalStatusAction: (status: "active" | "completed" | "archived") => this.goalsSupport.clickGoalStatusAction(status)
   });
   private readonly lifestormingWorkflow = createLifestormingWorkflow({
     ensurePage: () => this.ensurePage(),
@@ -121,11 +117,6 @@ export class SelfMaxPlaywrightClient {
     waitForDesiresCategory: (category: string, timeoutMs?: number, page?: Page) => this.lifestormingSupport.waitForDesiresCategory(category, timeoutMs, page),
     cacheDesire: (entry: { desireId: string; title?: string; category?: string }) => cacheDesire(this.entityCache, entry),
     findDesireIdByTitle: (title: string) => findDesireIdByTitle(this.entityCache, title),
-    readDesireSourceDoc: async (desireId: string) => {
-      const result = await this.goalsSupport.readFirestoreDocument(`users/${(await this.goalsSupport.getFirestoreAuthContext()).userId}/lifestormDesires/${desireId}`) as { ok?: boolean; body?: unknown };
-      return { desireDoc: result?.ok ? result.body : undefined };
-    },
-    updateDesireNotesViaFirestore: (desireId: string, notes: string) => this.goalsSupport.updateDesireNotesViaFirestore(desireId, notes),
     entityDesires: () => this.entityCache.desiresById
   });
   private readonly handlers = {
@@ -141,15 +132,10 @@ export class SelfMaxPlaywrightClient {
       discoverLinks: (route, url) => this.authWorkflow.discoverLinks(route, url, (resolvedRoute, resolvedUrl) => this.authWorkflow.navigateForRead(resolvedRoute, resolvedUrl)),
       listGoals: (filter) => this.goalsWorkflow.listGoals(filter),
       discoverGoals: (waitMs) => this.goalsWorkflow.discoverGoals(waitMs),
-      discoverGoalIds: (waitMs) => this.goalsSupport.discoverGoalIds(waitMs),
       readGoal: (goalTitle, goalId) => this.goalsWorkflow.readGoal(goalTitle, goalId),
       readGoalMetadata: (goalTitle, goalId) => this.goalsWorkflow.readGoalMetadata(goalTitle, goalId),
       readGoalWorkspace: (goalTitle, goalId) => this.goalsWorkflow.readGoalWorkspace(goalTitle, goalId),
       readGoalFull: (goalTitle, goalId) => this.goalsWorkflow.readGoalFull(goalTitle, goalId),
-      readGoalSourceDocs: (goalId) => {
-        if (!goalId) throw new Error("read_goal_source_docs requires payload.goalId");
-        return this.goalsSupport.readGoalFirestoreDocuments(goalId);
-      },
       readGoalStatusDetails: (goalTitle, goalId) => this.goalsWorkflow.readGoalStatusDetails(goalTitle, goalId),
       readCachedGoals: () => this.goalsWorkflow.readCachedGoals(),
       readCachedDesires: () => this.lifestormingWorkflow.readCachedDesires(),
@@ -180,7 +166,6 @@ export class SelfMaxPlaywrightClient {
       createGoalsFromDesires: (desires) => this.goalsWorkflow.createGoalsFromDesires(desires),
       createGoal: (input) => this.goalsWorkflow.createGoal(input),
       updateGoal: (goalTitle, updates) => this.goalsWorkflow.updateGoal(goalTitle, updates),
-      updateGoalDueDate: (goalTitle, goalId, dueDate) => this.goalsWorkflow.updateGoalDueDate(goalTitle, goalId, dueDate),
       startGoal: (goalTitle, goalId) => this.goalsWorkflow.startGoal(goalTitle, goalId),
       addTasks: (goalTitle, goalId, tasks, useSuggestions) => this.goalsWorkflow.addTasks(goalTitle, goalId, tasks, useSuggestions),
       removeTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.removeTask(goalTitle, goalId, taskText),
@@ -190,7 +175,6 @@ export class SelfMaxPlaywrightClient {
       reactivateGoal: (goalTitle, goalId) => this.goalsWorkflow.reactivateGoal(goalTitle, goalId),
       archiveGoal: (goalTitle, goalId) => this.goalsWorkflow.archiveGoal(goalTitle, goalId),
       deleteGoal: (goalTitle, goalId) => this.goalsWorkflow.deleteGoal(goalTitle, goalId),
-      deleteGoalApi: (goalId) => this.goalsWorkflow.deleteGoalApi(goalId),
       navigate: (route) => this.authWorkflow.navigate(route),
       invokeKnownAction: (payload) => this.authWorkflow.invokeKnownAction(payload)
     })
@@ -244,10 +228,6 @@ export class SelfMaxPlaywrightClient {
 
   private pageOrThrow(): Page {
     return this.ensurePage();
-  }
-
-  async readGoalFirestoreDocuments(goalId: string): Promise<unknown> {
-    return this.goalsSupport.readGoalFirestoreDocuments(goalId);
   }
 
 }

@@ -43,6 +43,10 @@ export const selectors = {
       { tier: "fallback", text: "I KNOW WHAT MY GOAL IS" },
       { tier: "legacy", text: "Create a New Goal" }
     ] satisfies TextSelectorCandidate[],
+    editActions: [
+      { tier: "primary", text: "EDIT" },
+      { tier: "fallback", text: "Edit" }
+    ] satisfies TextSelectorCandidate[],
     cardOpenActions: [
       { tier: "primary", text: "START" },
       { tier: "fallback", text: "Open" },
@@ -52,7 +56,25 @@ export const selectors = {
       { tier: "primary", text: "ADD TASKS" },
       { tier: "fallback", text: "Add Tasks" },
       { tier: "fallback", text: "Use the task suggestion tool" }
-    ] satisfies TextSelectorCandidate[]
+    ] satisfies TextSelectorCandidate[],
+    statusActions: {
+      completed: [
+        { tier: "primary", text: "COMPLETE GOAL" },
+        { tier: "fallback", text: "Complete Goal" },
+        { tier: "legacy", text: "Mark Complete" }
+      ] satisfies TextSelectorCandidate[],
+      archived: [
+        { tier: "primary", text: "ARCHIVE GOAL" },
+        { tier: "fallback", text: "Archive Goal" },
+        { tier: "legacy", text: "Archive" }
+      ] satisfies TextSelectorCandidate[],
+      active: [
+        { tier: "primary", text: "REACTIVATE GOAL" },
+        { tier: "fallback", text: "Reactivate Goal" },
+        { tier: "fallback", text: "Reactivate" },
+        { tier: "legacy", text: "Set Active" }
+      ] satisfies TextSelectorCandidate[]
+    }
   },
   tasks: {
     taskTab: [

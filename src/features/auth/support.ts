@@ -63,11 +63,10 @@ export function createAuthSupport(deps: AuthSupportDeps) {
       const hasAnchorText = (await anchor.count()) > 0 || (await categories.count()) > 0;
       if (!(onGoalsUrl && hasAnchorText)) return false;
 
+      const activeCount = await this.readGoalCount("Active");
       const archivedCount = await this.readGoalCount("Archived");
-      if (config.SELFMAX_AUTH_MIN_ARCHIVED > 0) {
-        return archivedCount !== null && archivedCount >= config.SELFMAX_AUTH_MIN_ARCHIVED;
-      }
-      return true;
+      if (activeCount !== null || archivedCount !== null) return true;
+      return false;
     },
 
     async waitForGoalsWorkspaceVisible(timeoutMs = 4000): Promise<boolean> {
@@ -87,7 +86,7 @@ export function createAuthSupport(deps: AuthSupportDeps) {
       const snippet = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 500);
       throw new AuthError(`login did not reach goals workspace (url=${page.url()} snippet=${snippet})`, {
         action: "reuse a validated long-lived session",
-        detail: "goals workspace readiness never reached the archived-count threshold"
+        detail: "goals workspace readiness never reached the visible goals dashboard state"
       });
     },
 

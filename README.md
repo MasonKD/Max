@@ -4,7 +4,7 @@ This project provides a Playwright-driven integration layer so OpenClaw/Moltbot 
 
 ## What it provides
 
-- Public API endpoints exposed over WebSocket `type: "api"`:
+- Public API endpoints exposed over a local-only WebSocket `type: "api"`:
   - `get_state`
   - `get_goals`
   - `get_goal`
@@ -22,7 +22,7 @@ This project provides a Playwright-driven integration layer so OpenClaw/Moltbot 
   - `update_goal`
   - `update_tasks`
 - Atomic primitive execution (serialized task queue).
-- Session-scoped message bridge for OpenClaw, SelfMax bot, and end-user over WebSocket.
+- Local single-user Playwright session reuse for boringly reliable beta testing.
 - State persistence in SelfMax browser storage (keyed by user/session).
 
 Internal Playwright primitives still exist for local smoke/dev tooling, but they are private implementation details and are not part of the external contract.
@@ -45,7 +45,7 @@ The source tree is organized by responsibility:
 - `src/client`
   - long-lived Playwright client and session/cache orchestration
 - `src/bridge`
-  - WebSocket server and external API exposure
+  - local-only WebSocket server and API exposure
 
 Barrel files are used at the feature and boundary folders where they improve imports:
 
@@ -93,7 +93,6 @@ npm run smoke:sequence
 npm run smoke:keep-open
 npm run smoke:signin
 node scripts/selfmax-smoke.mjs goals-list
-node scripts/selfmax-smoke.mjs goals-discover-ids
 node scripts/selfmax-smoke.mjs read-current-route
 node scripts/selfmax-smoke.mjs read-known-routes
 node scripts/selfmax-smoke.mjs discover-goals
@@ -135,7 +134,7 @@ Goal updates:
   - `status`: `active` | `completed` | `archived`
   - `dueDate`: `YYYY-MM-DD`
 - primary due-date path: `/goals` inline due-date editor from the visible `Due ...` label
-- fallback due-date path: backend write with postcondition verification
+- due-date updates are UI-only and must satisfy visible postconditions on `/goals`
 - legacy goal-specific mutation primitives still exist internally, but `update_goal` is the preferred public contract
 
 `smoke:keep-open` logs in once and keeps the browser open for repeated rounds. This is internal development tooling, not the external API:
@@ -152,11 +151,11 @@ exit
 
 ## WebSocket protocol
 
-Connect with query params:
+This bridge is local-only in the current beta phase:
 
-- `role`: `openclaw` | `selfmax-bot` | `end-user`
-- `userId`: user identifier
-- `sessionId`: session identifier
+- loopback connections only
+- `type: "api"` is the only supported external contract
+- chat/message passthrough is disabled
 
 API request example:
 
@@ -170,17 +169,6 @@ API request example:
     "name": "get_actions",
     "payload": {}
   }
-}
-```
-
-Chat passthrough example:
-
-```json
-{
-  "type": "message",
-  "role": "end-user",
-  "correlationId": "msg-1",
-  "payload": { "text": "Check in on my goals today." }
 }
 ```
 

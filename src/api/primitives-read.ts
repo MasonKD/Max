@@ -1,7 +1,6 @@
 import type {
   AssessmentQuestionState,
   AuthState,
-  DiscoverGoalIdsResult,
   DiscoverGoalsResult,
   DiscoverLinksResult,
   GoalStatusDetail,
@@ -37,7 +36,6 @@ import type {
   TaskSuggestionsResult,
   UnderstandOverviewResult,
   LevelCheckResult,
-  InternalGoalSourceDocsResult
 } from "../core/types.js";
 import type { KnownAction } from "../platform/catalog.js";
 
@@ -52,13 +50,11 @@ export type PrimitiveReadResult =
   | PageSectionsResult
   | DiscoverLinksResult
   | DiscoverGoalsResult
-  | DiscoverGoalIdsResult
   | InternalGoalListResult
   | InternalGoalReadResult
   | InternalGoalMetadataResult
   | InternalGoalWorkspaceResult
   | InternalGoalFullResult
-  | InternalGoalSourceDocsResult
   | InternalGoalStatusDetailsResult
   | InternalCachedGoalsResult
   | InternalGoalTasksResult
@@ -93,12 +89,10 @@ export type ReadPrimitiveDependencies = {
   discoverLinks: (route?: string, url?: string) => Promise<DiscoverLinksResult>;
   listGoals: (filter: string) => Promise<InternalGoalListResult>;
   discoverGoals: (waitMs?: unknown) => Promise<DiscoverGoalsResult>;
-  discoverGoalIds: (waitMs?: unknown) => Promise<DiscoverGoalIdsResult>;
   readGoal: (goalTitle?: string, goalId?: string) => Promise<InternalGoalReadResult>;
   readGoalMetadata: (goalTitle?: string, goalId?: string) => Promise<InternalGoalMetadataResult>;
   readGoalWorkspace: (goalTitle?: string, goalId?: string) => Promise<InternalGoalWorkspaceResult>;
   readGoalFull: (goalTitle?: string, goalId?: string) => Promise<InternalGoalFullResult>;
-  readGoalSourceDocs: (goalId?: string) => Promise<InternalGoalSourceDocsResult>;
   readGoalStatusDetails: (goalTitle?: string, goalId?: string) => Promise<InternalGoalStatusDetailsResult>;
   readCachedGoals: () => Promise<InternalCachedGoalsResult>;
   readCachedDesires: () => Promise<InternalCachedDesiresResult>;
@@ -139,12 +133,10 @@ export function createReadPrimitiveHandlers(deps: ReadPrimitiveDependencies): Pa
     discover_links: (req) => deps.discoverLinks(asOptionalString(req.payload?.route), asOptionalString(req.payload?.url)),
     list_goals: (req) => deps.listGoals((req.payload?.filter as string | undefined) ?? "all"),
     discover_goals: (req) => deps.discoverGoals(req.payload?.waitMs),
-    discover_goal_ids: (req) => deps.discoverGoalIds(req.payload?.waitMs),
     read_goal: (req) => deps.readGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     read_goal_metadata: (req) => deps.readGoalMetadata(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     read_goal_workspace: (req) => deps.readGoalWorkspace(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     read_goal_full: (req) => deps.readGoalFull(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    read_goal_source_docs: (req) => deps.readGoalSourceDocs(asOptionalString(req.payload?.goalId)),
     read_goal_status_details: (req) => deps.readGoalStatusDetails(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     read_cached_goals: () => deps.readCachedGoals(),
     read_cached_desires: () => deps.readCachedDesires(),

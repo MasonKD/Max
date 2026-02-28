@@ -20,7 +20,6 @@ export type WritePrimitiveDependencies = {
   createGoalsFromDesires: (desires: unknown[]) => Promise<PrimitiveWriteResult>;
   createGoal: (input: { title: string; category: string; dueDate: string }) => Promise<PrimitiveWriteResult>;
   updateGoal: (goalTitle: string, updates: { status?: "active" | "completed" | "archived"; dueDate?: string }) => Promise<PrimitiveWriteResult>;
-  updateGoalDueDate: (goalTitle: string | undefined, goalId: string | undefined, dueDate: string) => Promise<PrimitiveWriteResult>;
   startGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
   addTasks: (goalTitle: string | undefined, goalId: string | undefined, tasks: string[], useSuggestions: boolean) => Promise<PrimitiveWriteResult>;
   removeTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
@@ -30,7 +29,6 @@ export type WritePrimitiveDependencies = {
   reactivateGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
   archiveGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
   deleteGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  deleteGoalApi: (goalId?: string) => Promise<PrimitiveWriteResult>;
   navigate: (route: KnownRouteId) => Promise<PrimitiveWriteResult>;
   invokeKnownAction: (payload: KnownActionInvocation) => Promise<PrimitiveWriteResult>;
 };
@@ -102,11 +100,6 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
       }
       return deps.updateGoal(goalTitle, { status: status as "active" | "completed" | "archived" | undefined, dueDate });
     },
-    update_goal_due_date: (req) => {
-      const dueDate = asOptionalString(req.payload?.dueDate);
-      if (!dueDate) throw new Error("update_goal_due_date requires dueDate");
-      return deps.updateGoalDueDate(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId), dueDate);
-    },
     start_goal: (req) => deps.startGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     add_tasks: (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
@@ -158,7 +151,6 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
     reactivate_goal: (req) => deps.reactivateGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     archive_goal: (req) => deps.archiveGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
     delete_goal: (req) => deps.deleteGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    delete_goal_api: (req) => deps.deleteGoalApi(asOptionalString(req.payload?.goalId)),
     navigate: (req) => deps.navigate((req.payload?.route as KnownRouteId | undefined) ?? "goals"),
     invoke_known_action: (req) => deps.invokeKnownAction(req.payload ?? {})
   };

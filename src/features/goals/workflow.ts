@@ -51,7 +51,6 @@ export type GoalsWorkflowDeps = {
   }) => void;
   findGoalIdByTitle: (title: string) => string | undefined;
   listGoalIdsFromPage: () => Promise<string[]>;
-  discoverGoalIds: (waitMs?: unknown) => Promise<{ goalIds: string[]; waitMs: number; loadingVisible: boolean }>;
   tryOpenAnyGoalByLink: () => Promise<boolean>;
   tryClickStartInGoalsList: () => Promise<boolean>;
   tryClickGoalCardAction: (goalTitle: string, actionTexts: string[]) => Promise<boolean>;
@@ -80,17 +79,14 @@ export type GoalsWorkflowDeps = {
   waitForGoalCardTaskCompletionDelta: (goalTitle: string, previousCompleted: number, delta: number, timeoutMs?: number) => Promise<boolean>;
   clickGoalCardTaskToggle: (goalTitle: string, taskText: string) => Promise<boolean>;
   clickGoalCardTaskRemove: (goalTitle: string, taskText: string) => Promise<boolean>;
-  deleteTaskViaFirestore: (goalId: string, taskText: string) => Promise<boolean>;
-  waitForTaskDocumentWrite: (goalId: string, taskText: string, timeoutMs?: number) => Promise<string | null>;
-  updateGoalStatusViaFirestore: (goalId: string, status: "active" | "completed" | "archived") => Promise<boolean>;
-  updateGoalDueDateViaFirestore: (goalId: string, dueDateIso: string) => Promise<boolean>;
-  readGoalSourceDocs: (goalId: string) => Promise<unknown>;
   entityGoals: () => Record<string, GoalCacheEntry>;
   isGoalContextOpen: (goalTitle?: string) => Promise<boolean>;
   tryPromoteDesireToGoal: (desireTitle: string) => Promise<boolean>;
   updateGoalDueDateFromGoals: (goalTitle: string, dueDateInput: string) => Promise<boolean>;
   formatGoalDueLabel: (input: string) => string | null;
   waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => Promise<boolean>;
+  openGoalEditPanel: () => Promise<Locator | null>;
+  clickGoalStatusAction: (status: "active" | "completed" | "archived") => Promise<boolean>;
 };
 
 export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
@@ -207,34 +203,59 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       }
 
       const goals = await page.evaluate(() => {
-        const rows = Array.from(document.querySelectorAll("article, section, li, div"));
+        const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+        const linesOf = (value: string) => value.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+        const categories = new Set(["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"]);
+        const goalScopeAnchor = Array.from(document.querySelectorAll("*"))
+          .find((node) => normalize(node.textContent || "") === "YOUR GOALS");
+        const scope = goalScopeAnchor?.parentElement?.parentElement ?? document.body;
+        const candidates = Array.from(scope.querySelectorAll("article, section, li, div"))
+          .filter((node) => {
+            const text = normalize(node.textContent || "");
+            return Boolean(text) && /^START$/im.test(node.textContent || "") && /Due\s+\d{2}\/\d{2}\/\d{2}/i.test(text);
+          });
+
+        const seen = new Set<string>();
         const extracted: GoalSummary[] = [];
-        const categories = ["health", "work", "love", "family", "social", "fun", "dreams", "meaning"];
-
-        for (const row of rows) {
-          const text = (row.textContent || "").replace(/\s+/g, " ").trim();
-          if (!text || !/start|tasks completed|due/i.test(text)) continue;
-          const lines = (row.textContent || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
-          const title = lines.find((line) => !/start|view|archive|complete|due|tasks completed|meaning|health|work|love|family|social|fun|dreams/i.test(line)) ?? "";
-          if (!title || title.length < 2) continue;
-
-          const html = row.outerHTML;
-          const idMatch = html.match(/goalId=([A-Za-z0-9_-]+)/i) ?? html.match(/data-goal-id=["']?([A-Za-z0-9_-]+)/i);
-          const category = lines.find((line) => categories.includes(line.toLowerCase()));
+        for (const row of candidates) {
+          const text = normalize(row.textContent || "");
+          if (!text) continue;
+          const lines = linesOf(row.textContent || "");
+          const categoryIndex = lines.findIndex((line) => categories.has(line));
+          if (categoryIndex <= 0) continue;
+          const title = lines[categoryIndex - 1];
+          const category = lines[categoryIndex];
           const dueLabel = lines.find((line) => /^Due\s/i.test(line));
+          if (!title || !category || !dueLabel || seen.has(title)) continue;
+          seen.add(title);
           const progressLabel = lines.find((line) => /tasks completed|\d+%/i.test(line));
-          const summaryIndex = lines.findIndex((line) => /tasks completed|No tasks/i.test(line));
-          const taskSummaryLabel = summaryIndex !== -1 ? lines[summaryIndex] : undefined;
-          const taskPreviewItems = lines.filter(
-            (line) => line !== title && line !== category && line !== dueLabel && line !== progressLabel && line !== taskSummaryLabel && !/^(START|ADD TASKS)$/i.test(line) && line.length > 0
+          const taskSummaryLabel = lines.find((line) => /tasks completed|No tasks/i.test(line));
+          const hasExplicitAddTasks = lines.some((line) => /^ADD TASKS$/i.test(line));
+          const taskPreviewItems = lines.filter((line, index) =>
+            index > categoryIndex &&
+            line !== dueLabel &&
+            line !== progressLabel &&
+            line !== taskSummaryLabel &&
+            !/^(START|ADD TASKS|No tasks)$/i.test(line) &&
+            !/^\d+%$/i.test(line)
           ).slice(0, 12);
-          const taskPanelState =
-            taskSummaryLabel && /tasks completed/i.test(taskSummaryLabel)
+          const idMatch =
+            row.outerHTML.match(/goalId=([A-Za-z0-9_-]+)/i) ??
+            row.outerHTML.match(/data-goal-id=["']?([A-Za-z0-9_-]+)/i);
+          extracted.push({
+            title,
+            goalId: idMatch?.[1],
+            category,
+            dueLabel,
+            progressLabel,
+            taskSummaryLabel,
+            taskPreviewItems,
+            taskPanelState: taskSummaryLabel && /tasks completed/i.test(taskSummaryLabel)
               ? "tasks_present"
-              : /No tasks/i.test(taskSummaryLabel ?? "") || lines.some((line) => /^ADD TASKS$/i.test(line))
+              : hasExplicitAddTasks
                 ? "add_tasks"
-                : "empty";
-          extracted.push({ title, goalId: idMatch?.[1], category, dueLabel, progressLabel, taskSummaryLabel, taskPreviewItems, taskPanelState });
+                : "empty"
+          });
         }
 
         return extracted;
@@ -316,10 +337,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         return items;
       });
 
-      const stream = await deps.discoverGoalIds(waitMs);
       const merged = new Map<string, { goalId: string; title?: string }>();
       for (const item of dom) merged.set(item.goalId, item);
-      for (const id of stream.goalIds) if (!merged.has(id)) merged.set(id, { goalId: id });
 
       if (merged.size === 0) {
         const listed = await this.listGoals("active");
@@ -339,9 +358,9 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
 
       return {
         goals: [...merged.values()],
-        sources: { domGoalIds: dom.length, streamGoalIds: stream.goalIds.length },
-        waitMs: stream.waitMs,
-        loadingVisible: stream.loadingVisible
+        sources: { domGoalIds: dom.length, streamGoalIds: 0 },
+        waitMs: typeof waitMs === "number" && Number.isFinite(waitMs) ? waitMs : 0,
+        loadingVisible: false
       };
     },
 
@@ -386,12 +405,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       const snapshot = await deps.captureCurrentGoalWorkspace();
       const resolvedGoalId = goalId ?? goalIdFromUrl(page.url()) ?? undefined;
       const resolvedGoalTitle = goalTitle ?? snapshot.title;
-      const docs = (resolvedGoalId ? await deps.readGoalSourceDocs(resolvedGoalId).catch(() => ({})) : {}) as {
-        summaryDoc?: { fields?: Record<string, unknown> };
-      };
-      const summaryFields = docs.summaryDoc?.fields ?? {};
-      const summaries = (summaryFields.summary as Record<string, unknown> | undefined) ?? {};
-      const meta = (summaryFields.meta as Record<string, unknown> | undefined) ?? {};
       const fieldKeyByName: Record<string, string> = {
         DESIRE: "desire",
         ENVIRONMENT: "environment",
@@ -402,12 +415,10 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       };
       const details: GoalStatusDetail[] = snapshot.statusBlocks.map((block) => {
         const key = fieldKeyByName[block.name] ?? block.name.toLowerCase();
-        const summary = typeof summaries[key] === "string" ? summaries[key] : undefined;
-        const updatedAt = typeof (meta[key] as Record<string, unknown> | undefined)?.updatedAt === "string"
-          ? String((meta[key] as Record<string, unknown>).updatedAt)
-          : null;
+        const summary = undefined;
+        const updatedAt = null;
         const hasNotUpdatedPrompt = block.prompts.some((prompt) => /not yet updated/i.test(prompt));
-        const checked = Boolean(summary && summary.trim().length > 0) || Boolean(updatedAt) || (!hasNotUpdatedPrompt && !/^○$/u.test(block.state.trim()));
+        const checked = !hasNotUpdatedPrompt && !/^○$/u.test(block.state.trim());
         return {
           name: block.name,
           key,
@@ -637,33 +648,18 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       if (!dueDateInput?.trim()) throw new Error("update_goal_due_date requires dueDate");
       const normalizedDate = normalizeDateInput(dueDateInput);
       if (!normalizedDate) throw new Error(`invalid dueDate: ${dueDateInput}`);
-      const normalizedIso = `${normalizedDate}T00:00:00.000Z`;
       const expectedLabel = deps.formatGoalDueLabel(normalizedDate);
       const { goalId: resolvedGoalId, goalTitle: resolvedGoalTitle } = await resolveGoalIdentity(goalTitle, goalId);
-
       let updated = false;
-      if (resolvedGoalTitle) {
-        updated = await deps.updateGoalDueDateFromGoals(resolvedGoalTitle, normalizedDate).catch(() => false);
-      }
-      if (!updated) {
-        updated = await deps.updateGoalDueDateViaFirestore(resolvedGoalId, normalizedIso);
-        if (updated && resolvedGoalTitle && expectedLabel) {
-          await deps.ensureOnGoals();
-          await deps.waitForGoalDueLabel(resolvedGoalTitle, expectedLabel, 3000).catch(() => false);
-        }
-      }
+      if (resolvedGoalTitle) updated = await deps.updateGoalDueDateFromGoals(resolvedGoalTitle, normalizedDate).catch(() => false);
       if (!updated) {
         throw new Error(`could not update due date for ${resolvedGoalTitle ?? resolvedGoalId}`);
       }
-
-      const docs = await deps.readGoalSourceDocs(resolvedGoalId).catch(() => null) as { desireDoc?: { fields?: Record<string, unknown> } } | null;
-      const dueDate = docs?.desireDoc?.fields?.dueDate;
-      const dueDateMatches = typeof dueDate === "string" ? dueDate.startsWith(normalizedDate) : false;
-      if (!dueDateMatches && resolvedGoalTitle && expectedLabel) {
+      if (resolvedGoalTitle && expectedLabel) {
         const labelMatches = await deps.waitForGoalDueLabel(resolvedGoalTitle, expectedLabel, 3000).catch(() => false);
         if (!labelMatches) throw new Error(`update_goal_due_date postcondition failed for ${resolvedGoalTitle}`);
       }
-      return { updated: true, goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, dueDate: normalizedIso };
+      return { updated: true, goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, dueDate: normalizedDate };
     },
 
     async updateGoal(goalTitle: string, updates: { status?: "active" | "completed" | "archived"; dueDate?: string }) {
@@ -701,11 +697,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         if (discoveredIds.length > 0) {
           await deps.openGoalContextById(discoveredIds[0]);
           if (await deps.waitForGoalContext(undefined, 2500)) return { started: true, goalId: discoveredIds[0] };
-        }
-        const streamIds = (await deps.discoverGoalIds()).goalIds;
-        if (streamIds.length > 0) {
-          await deps.openGoalContextById(streamIds[0]);
-          if (await deps.waitForGoalContext(undefined, 2500)) return { started: true, goalId: streamIds[0] };
         }
         let clicked = (await deps.tryOpenAnyGoalByLink()) || (await deps.tryClickStartInGoalsList()) || (await deps.tryClickByText(page, ["START", "Start", "Open", "View"]));
         if (!clicked) {
@@ -763,10 +754,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       for (const task of requestedTasks) {
         await deps.tryClickByText(page, ["Add new task", "Add task", "New task"]);
         const field = await deps.resolveTaskInput();
-        const docWritePromise = resolvedGoalId ? deps.waitForTaskDocumentWrite(resolvedGoalId, task, 5000) : Promise.resolve(null);
         await field.fill(task);
         await field.press("Enter");
-        await docWritePromise.catch(() => null);
         const observed = await deps.waitForTaskToAppear(task, 3000);
         addedTaskTexts.push(observed?.text ?? task);
         added += 1;
@@ -799,9 +788,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         } catch {
           resolvedGoalId = undefined;
         }
-      }
-      if (!removed && resolvedGoalId) {
-        removed = await deps.deleteTaskViaFirestore(resolvedGoalId, taskText);
       }
       if (!removed) throw new Error(`could not remove task: ${taskText}`);
       await deps.ensureOnGoals();
@@ -850,7 +836,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         archived: await deps.readGoalCount("Archived")
       };
       const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const done = await deps.updateGoalStatusViaFirestore(resolved.goalId, "completed");
+      const opened = await deps.openGoalEditPanel();
+      const done = Boolean(opened) && await deps.clickGoalStatusAction("completed");
       if (!done) throw new Error("could not complete goal");
       const transitioned = await waitForGoalStatusChange("completed", resolved.goalTitle, before);
       if (!transitioned) throw new Error("complete_goal postcondition failed");
@@ -865,7 +852,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         archived: await deps.readGoalCount("Archived")
       };
       const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const done = await deps.updateGoalStatusViaFirestore(resolved.goalId, "archived");
+      const opened = await deps.openGoalEditPanel();
+      const done = Boolean(opened) && await deps.clickGoalStatusAction("archived");
       if (!done) throw new Error("could not archive goal");
       const transitioned = await waitForGoalStatusChange("archived", resolved.goalTitle, before);
       if (!transitioned) throw new Error("archive_goal postcondition failed");
@@ -880,7 +868,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         archived: await deps.readGoalCount("Archived")
       };
       const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const done = await deps.updateGoalStatusViaFirestore(resolved.goalId, "active");
+      const opened = await deps.openGoalEditPanel();
+      const done = Boolean(opened) && await deps.clickGoalStatusAction("active");
       if (!done) throw new Error("could not reactivate goal");
       const transitioned = await waitForGoalStatusChange("active", resolved.goalTitle, before);
       if (!transitioned) throw new Error("reactivate_goal postcondition failed");
@@ -909,27 +898,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       return { deleted: true, goalTitle, goalId: goalId ?? goalIdFromUrl(page.url()) };
     },
 
-    async deleteGoalApi(goalId?: string) {
-      if (!goalId) throw new Error("delete_goal_api requires payload.goalId");
-      const page = deps.pageOrThrow();
-      await deps.ensureOnGoals();
-      const result = await page.evaluate(async ({ id }) => {
-        const global = window as unknown as Record<string, unknown>;
-        const firebase = global.firebase as
-          | {
-              apps?: unknown[];
-              firestore?: () => { collection: (name: string) => { doc: (docId: string) => { delete: () => Promise<void> } } };
-            }
-          | undefined;
-        if (firebase?.firestore) {
-          await firebase.firestore().collection("goals").doc(id).delete();
-          return { ok: true, method: "firebase.firestore" };
-        }
-        return { ok: false, method: "unavailable" };
-      }, { id: goalId });
-      if (!result.ok) throw new Error("delete_goal_api unavailable: firebase sdk is not exposed in this app context");
-      return { deleted: true, goalId, method: result.method };
-    }
   };
 
   return createGoalsWorkflowInstance;

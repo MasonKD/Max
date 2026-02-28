@@ -65,7 +65,7 @@ const EnvSchema = z.object({
   SELFMAX_PASSWORD: z.string().min(1),
   SELFMAX_STATE_KEY: z.string().default("openclaw_state"),
   SELFMAX_STORAGE_STATE_PATH: z.string().default(".auth/selfmax-storage-state.json"),
-  SELFMAX_AUTH_MIN_ARCHIVED: z.coerce.number().default(20),
+  SELFMAX_AUTH_MIN_ARCHIVED: z.coerce.number().default(1),
   HEADLESS: z
     .string()
     .optional()

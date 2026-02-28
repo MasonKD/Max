@@ -29,49 +29,7 @@ export type GoalsSupportDeps = {
   listGoals: (filter: string) => Promise<{ goals: Array<{ title: string; goalId?: string; taskPanelState?: "tasks_present" | "add_tasks" | "empty"; taskSummaryLabel?: string; taskPreviewItems?: string[] }> }>;
 };
 
-type FirestoreAuthContext = {
-  projectId: string;
-  userId: string;
-  accessToken: string;
-};
-
-function simplifyFirestoreValue(value: any): any {
-  if (!value || typeof value !== "object") return value;
-  if ("stringValue" in value) return value.stringValue;
-  if ("integerValue" in value) return Number(value.integerValue);
-  if ("doubleValue" in value) return Number(value.doubleValue);
-  if ("booleanValue" in value) return Boolean(value.booleanValue);
-  if ("timestampValue" in value) return value.timestampValue;
-  if ("nullValue" in value) return null;
-  if ("mapValue" in value) {
-    const fields = value.mapValue?.fields ?? {};
-    return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key, simplifyFirestoreValue(item)]));
-  }
-  if ("arrayValue" in value) {
-    const values = Array.isArray(value.arrayValue?.values) ? value.arrayValue.values : [];
-    return values.map(simplifyFirestoreValue);
-  }
-  if ("referenceValue" in value) return value.referenceValue;
-  if ("geoPointValue" in value) return value.geoPointValue;
-  if ("bytesValue" in value) return value.bytesValue;
-  return value;
-}
-
-function simplifyFirestoreDocument(doc: any): any {
-  if (!doc || typeof doc !== "object") return doc;
-  const fields = doc.fields && typeof doc.fields === "object" ? doc.fields : {};
-  return {
-    name: typeof doc.name === "string" ? doc.name : undefined,
-    createTime: typeof doc.createTime === "string" ? doc.createTime : undefined,
-    updateTime: typeof doc.updateTime === "string" ? doc.updateTime : undefined,
-    fields: Object.fromEntries(Object.entries(fields).map(([key, item]) => [key, simplifyFirestoreValue(item)]))
-  };
-}
-
 export function createGoalsSupport(deps: GoalsSupportDeps) {
-  let firestoreAuthCache: FirestoreAuthContext | null = null;
-  const taskDocIds = new Map<string, string>();
-
   return {
     async getGoalTaskSummary(goalTitle?: string, goalId?: string) {
       if (goalId) {
@@ -200,364 +158,6 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       return false;
     },
 
-    async getFirestoreAuthContext(): Promise<FirestoreAuthContext> {
-      if (firestoreAuthCache) return firestoreAuthCache;
-      const page = deps.pageOrThrow();
-      await deps.ensureOnGoals();
-
-      const sessionCookie = (await page.context().cookies()).find((cookie) => cookie.name === "session");
-      if (!sessionCookie?.value) {
-        throw new Error("could not locate selfmax session cookie");
-      }
-
-      const payload = parseJwtPayload(sessionCookie.value);
-      const userId = typeof payload?.user_id === "string" ? payload.user_id : typeof payload?.sub === "string" ? payload.sub : "";
-      const projectId = typeof payload?.aud === "string" ? payload.aud : "";
-      if (!userId || !projectId) {
-        throw new Error("could not derive firestore user/project context from session cookie");
-      }
-
-      const token = await captureFirestoreAccessToken(page);
-      firestoreAuthCache = { projectId, userId, accessToken: token };
-      return firestoreAuthCache;
-    },
-
-    async deleteTaskViaFirestore(goalId: string, taskText: string): Promise<boolean> {
-      const auth = await this.getFirestoreAuthContext();
-      const tempPage = await deps.pageOrThrow().context().newPage();
-      try {
-        await tempPage.goto("about:blank").catch(() => undefined);
-        const cachedDocId = taskDocIds.get(taskDocCacheKey(goalId, taskText));
-        if (cachedDocId) {
-          return await tempPage.evaluate(async ({ projectId, accessToken, userId, docId }) => {
-            const headers = {
-              Authorization: `Bearer ${accessToken}`,
-              "Content-Type": "application/json"
-            };
-            const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/actions/${docId}`;
-            const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-              method: "POST",
-              headers,
-              body: JSON.stringify({
-                writes: [{ delete: docName }]
-              })
-            });
-            if (!commitRes.ok) {
-              throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
-            }
-            return true;
-          }, { projectId: auth.projectId, accessToken: auth.accessToken, userId: auth.userId, docId: cachedDocId });
-        }
-        return await tempPage.evaluate(async ({ projectId, userId, accessToken, desiredGoalId, desiredTaskText }) => {
-          const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          };
-          const parent = `projects/${projectId}/databases/(default)/documents/users/${userId}`;
-          const queryRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:runQuery`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              structuredQuery: {
-                from: [{ collectionId: "actions" }],
-                where: {
-                  compositeFilter: {
-                    op: "AND",
-                    filters: [
-                      {
-                        fieldFilter: {
-                          field: { fieldPath: "desireId" },
-                          op: "EQUAL",
-                          value: { stringValue: desiredGoalId }
-                        }
-                      },
-                      {
-                        fieldFilter: {
-                          field: { fieldPath: "description" },
-                          op: "EQUAL",
-                          value: { stringValue: desiredTaskText }
-                        }
-                      }
-                    ]
-                  }
-                }
-              },
-              parent
-            })
-          });
-          if (!queryRes.ok) {
-            throw new Error(`runQuery failed (${queryRes.status}): ${await queryRes.text()}`);
-          }
-          const rows = await queryRes.json();
-          const match = Array.isArray(rows) ? rows.find((row) => row?.document?.name) : null;
-          const docName = typeof match?.document?.name === "string" ? match.document.name : "";
-          if (!docName) return false;
-
-          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              writes: [{ delete: docName }]
-            })
-          });
-          if (!commitRes.ok) {
-            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
-          }
-          return true;
-        }, { ...auth, desiredGoalId: goalId, desiredTaskText: taskText });
-      } finally {
-        await tempPage.close().catch(() => undefined);
-      }
-    },
-
-    async updateGoalStatusViaFirestore(goalId: string, status: "active" | "completed" | "archived"): Promise<boolean> {
-      const auth = await this.getFirestoreAuthContext();
-      const tempPage = await deps.pageOrThrow().context().newPage();
-      try {
-        await tempPage.goto("about:blank").catch(() => undefined);
-        return await tempPage.evaluate(async ({ projectId, userId, accessToken, goalId: desiredGoalId, status: nextStatus }) => {
-          const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          };
-          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/desires/${desiredGoalId}`;
-          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              writes: [
-                {
-                  update: {
-                    name: docName,
-                    fields: {
-                      status: { stringValue: nextStatus }
-                    }
-                  },
-                  updateMask: {
-                    fieldPaths: ["status"]
-                  },
-                  currentDocument: {
-                    exists: true
-                  }
-                }
-              ]
-            })
-          });
-          if (!commitRes.ok) {
-            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
-          }
-          return true;
-        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, goalId, status });
-      } finally {
-        await tempPage.close().catch(() => undefined);
-      }
-    },
-
-    async updateGoalDueDateViaFirestore(goalId: string, dueDateIso: string): Promise<boolean> {
-      const auth = await this.getFirestoreAuthContext();
-      const tempPage = await deps.pageOrThrow().context().newPage();
-      try {
-        await tempPage.goto("about:blank").catch(() => undefined);
-        return await tempPage.evaluate(async ({ projectId, userId, accessToken, goalId: desiredGoalId, dueDate }) => {
-          const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          };
-          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/desires/${desiredGoalId}`;
-          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              writes: [
-                {
-                  update: {
-                    name: docName,
-                    fields: {
-                      dueDate: { timestampValue: dueDate }
-                    }
-                  },
-                  updateMask: {
-                    fieldPaths: ["dueDate"]
-                  },
-                  currentDocument: {
-                    exists: true
-                  }
-                }
-              ]
-            })
-          });
-          if (!commitRes.ok) {
-            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
-          }
-          return true;
-        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, goalId, dueDate: dueDateIso });
-      } finally {
-        await tempPage.close().catch(() => undefined);
-      }
-    },
-
-    async updateDesireNotesViaFirestore(desireId: string, notes: string): Promise<boolean> {
-      const auth = await this.getFirestoreAuthContext();
-      const tempPage = await deps.pageOrThrow().context().newPage();
-      try {
-        await tempPage.goto("about:blank").catch(() => undefined);
-        return await tempPage.evaluate(async ({ projectId, userId, accessToken, desireId: requestedId, notes: nextNotes }) => {
-          const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          };
-          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/lifestormDesires/${requestedId}`;
-          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              writes: [
-                {
-                  update: {
-                    name: docName,
-                    fields: {
-                      notes: { stringValue: nextNotes }
-                    }
-                  },
-                  updateMask: {
-                    fieldPaths: ["notes"]
-                  },
-                  currentDocument: {
-                    exists: true
-                  }
-                }
-              ]
-            })
-          });
-          if (!commitRes.ok) {
-            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
-          }
-          return true;
-        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, desireId, notes });
-      } finally {
-        await tempPage.close().catch(() => undefined);
-      }
-    },
-
-    async readFirestoreDocument(documentPath: string): Promise<unknown> {
-      const auth = await this.getFirestoreAuthContext();
-      const tempPage = await deps.pageOrThrow().context().newPage();
-      try {
-        await tempPage.goto("about:blank").catch(() => undefined);
-        return await tempPage.evaluate(async ({ projectId, accessToken, documentPath: requestedPath }) => {
-          const headers = {
-            Authorization: `Bearer ${accessToken}`,
-            "Content-Type": "application/json"
-          };
-          const res = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${requestedPath}`, {
-            method: "GET",
-            headers
-          });
-          const text = await res.text();
-          let body: unknown = text;
-          try {
-            body = JSON.parse(text);
-          } catch {
-          }
-          return {
-            ok: res.ok,
-            status: res.status,
-            body
-          };
-        }, { projectId: auth.projectId, accessToken: auth.accessToken, documentPath });
-      } finally {
-        await tempPage.close().catch(() => undefined);
-      }
-    },
-
-    async readGoalFirestoreDocuments(goalId: string): Promise<{
-      desireDoc: unknown;
-      summaryDoc: unknown;
-      candidateDocs: Array<{ path: string; result: unknown }>;
-    }> {
-      const auth = await this.getFirestoreAuthContext();
-      const candidates = [
-        `users/${auth.userId}/desires/${goalId}`,
-        `users/${auth.userId}/selfMaximizeSummaries/${goalId}`,
-        `users/${auth.userId}/goals/${goalId}`,
-        `users/${auth.userId}/selfMaximize/${goalId}`
-      ];
-      const results: Array<{ path: string; result: unknown }> = [];
-      for (const path of candidates) {
-        const result = await this.readFirestoreDocument(path);
-        results.push({ path, result });
-      }
-      const desireRaw = results.find((item) => item.path.includes("/desires/"))?.result as { ok?: boolean; body?: any } | undefined;
-      const summaryRaw = results.find((item) => item.path.includes("/selfMaximizeSummaries/"))?.result as { ok?: boolean; body?: any } | undefined;
-      return {
-        desireDoc: desireRaw?.ok ? simplifyFirestoreDocument(desireRaw.body) : desireRaw,
-        summaryDoc: summaryRaw?.ok ? simplifyFirestoreDocument(summaryRaw.body) : summaryRaw,
-        candidateDocs: results.map((item) => ({
-          path: item.path,
-          result: (item.result as { ok?: boolean; body?: any })?.ok ? simplifyFirestoreDocument((item.result as { body?: any }).body) : item.result
-        }))
-      };
-    },
-
-    async waitForTaskDocumentWrite(goalId: string, taskText: string, timeoutMs = 4000): Promise<string | null> {
-      const page = deps.pageOrThrow();
-      return new Promise<string | null>((resolve) => {
-        const timeout = setTimeout(() => {
-          page.off("request", onRequest);
-          resolve(null);
-        }, timeoutMs);
-
-        const onRequest = (request: { url: () => string; postData: () => string | null }): void => {
-          const url = request.url();
-          if (!/firestore\.googleapis\.com\/google\.firestore\.v1\.Firestore\/Write\/channel/i.test(url)) return;
-          const body = decodeURIComponent(request.postData() || "");
-          if (!body.includes(taskText)) return;
-          const match = body.match(/documents\/users\/[^/]+\/actions\/([A-Za-z0-9_-]+)/i);
-          if (!match?.[1]) return;
-          clearTimeout(timeout);
-          page.off("request", onRequest);
-          taskDocIds.set(taskDocCacheKey(goalId, taskText), match[1]);
-          resolve(match[1]);
-        };
-
-        page.on("request", onRequest);
-      });
-    },
-
-    async discoverGoalIds(waitMs?: unknown): Promise<{ goalIds: string[]; waitMs: number; loadingVisible: boolean }> {
-      const page = deps.pageOrThrow();
-      await deps.ensureOnGoals();
-      const wait = typeof waitMs === "number" && Number.isFinite(waitMs) ? Math.max(0, Math.min(waitMs, 30000)) : 1200;
-
-      const chunks: string[] = [];
-      const onResponse = async (res: { url: () => string; text: () => Promise<string> }): Promise<void> => {
-        const url = res.url();
-        if (!/firestore\.googleapis\.com\/google\.firestore\.v1\.Firestore\/Listen\/channel/i.test(url)) return;
-        try {
-          const text = await res.text();
-          if (text) chunks.push(text.slice(0, 200_000));
-        } catch {
-        }
-      };
-
-      page.on("response", onResponse);
-      try {
-        await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
-        await page.waitForTimeout(wait);
-      } finally {
-        page.off("response", onResponse);
-      }
-
-      const source = chunks.join("\n");
-      const ids = new Set<string>();
-      for (const match of source.matchAll(/documents\/goals\/([A-Za-z0-9_-]+)/g)) if (match[1]) ids.add(match[1]);
-      for (const match of source.matchAll(/"goalId":"([A-Za-z0-9_-]+)"/g)) if (match[1]) ids.add(match[1]);
-      for (const match of source.matchAll(/goalId=([A-Za-z0-9_-]+)/g)) if (match[1]) ids.add(match[1]);
-
-      const bodyText = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
-      return { goalIds: [...ids], waitMs: wait, loadingVisible: /loading/i.test(bodyText) };
-    },
-
     async ensureOnGoalTaskContext(goalTitle?: string, goalId?: string): Promise<void> {
       if (goalId) {
         await this.openGoalContextById(goalId);
@@ -602,6 +202,34 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
         action: "inspect TASKS selector tiers",
         detail: "button click succeeded but no task panel anchor became visible"
       });
+    },
+
+    async openGoalEditPanel(): Promise<Locator | null> {
+      const page = deps.pageOrThrow();
+      const editButton = page.getByRole("button", { name: /^edit$/i }).first();
+      if ((await editButton.count()) > 0 && (await editButton.isVisible().catch(() => false))) {
+        await editButton.click({ timeout: 2000 }).catch(() => undefined);
+      } else {
+        await deps.tryClickByText(page, textSelectors(selectors.goals.editActions));
+      }
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline) {
+        const panel = page.locator("section, article, div").filter({
+          has: page.getByText(/complete goal|archive goal|reactivate goal|set active|due date/i).first()
+        }).first();
+        if ((await panel.count()) > 0 && (await panel.isVisible().catch(() => false))) return panel;
+        await page.waitForTimeout(200);
+      }
+      return null;
+    },
+
+    async clickGoalStatusAction(status: "active" | "completed" | "archived"): Promise<boolean> {
+      const page = deps.pageOrThrow();
+      const actionTexts = textSelectors(selectors.goals.statusActions[status]);
+      const clicked = await deps.tryClickByText(page, actionTexts);
+      if (!clicked) return false;
+      await deps.tryClickByText(page, ["Confirm", "Done", "Save", "Yes", "YES"]);
+      return true;
     },
 
     async openGoalContext(goalTitle: string): Promise<void> {
@@ -1073,62 +701,4 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
 function normalizeTaskText(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
-}
-
-function taskDocCacheKey(goalId: string, taskText: string): string {
-  return `${goalId}:${normalizeTaskText(taskText)}`;
-}
-
-function parseJwtPayload(token: string): Record<string, unknown> | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const normalized = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-async function captureFirestoreAccessToken(page: Page): Promise<string> {
-  const existing = await page.evaluate(() => document.body.innerText || "").catch(() => "");
-  if (!existing) {
-    await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
-  }
-
-  return new Promise<string>(async (resolve, reject) => {
-    const timeout = setTimeout(() => {
-      page.off("request", onRequest);
-      reject(new Error("timed out capturing firestore access token"));
-    }, 8000);
-
-    const onRequest = async (request: { url: () => string; postData: () => string | null; allHeaders?: () => Promise<Record<string, string>>; headers?: () => Record<string, string> }): Promise<void> => {
-      const url = request.url();
-      if (!/firestore\.googleapis\.com/i.test(url)) return;
-      try {
-        const asyncHeaders = typeof request.allHeaders === "function" ? await request.allHeaders() : undefined;
-        const headers = asyncHeaders ?? (typeof request.headers === "function" ? request.headers() : {});
-        const authHeader = headers.authorization ?? headers.Authorization;
-        const authMatch = authHeader?.match(/^Bearer\s+([A-Za-z0-9._-]+)/i);
-        if (authMatch?.[1]) {
-          clearTimeout(timeout);
-          page.off("request", onRequest);
-          resolve(authMatch[1]);
-          return;
-        }
-      } catch {
-      }
-      const body = request.postData() || "";
-      const decoded = decodeURIComponent(body);
-      const match = decoded.match(/Authorization:\s*Bearer\s+([A-Za-z0-9._-]+)/i);
-      if (!match?.[1]) return;
-      clearTimeout(timeout);
-      page.off("request", onRequest);
-      resolve(match[1]);
-    };
-
-    page.on("request", onRequest);
-    await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
-  });
 }

@@ -64,13 +64,6 @@ const primitivePayloadSchemas = {
   }).strict().refine((value) => Boolean(value.status || value.dueDate), {
     message: "status or dueDate is required"
   }),
-  update_goal_due_date: z.object({
-    goalTitle: nonEmptyString.optional(),
-    goalId: nonEmptyString.optional(),
-    dueDate: isoDateSchema
-  }).strict().refine((value) => Boolean(value.goalTitle || value.goalId), {
-    message: "goalTitle or goalId is required"
-  }),
   read_auth_state: z.undefined().optional(),
   read_current_route: z.undefined().optional(),
   read_known_routes: z.undefined().optional(),
@@ -89,12 +82,10 @@ const primitivePayloadSchemas = {
   }).strict().optional(),
   list_goals: z.object({ filter: nonEmptyString.optional() }).strict().optional(),
   discover_goals: z.object({ waitMs: z.unknown().optional() }).strict().optional(),
-  discover_goal_ids: z.object({ waitMs: z.unknown().optional() }).strict().optional(),
   read_goal: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   read_goal_metadata: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   read_goal_workspace: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   read_goal_full: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
-  read_goal_source_docs: z.object({ goalId: nonEmptyString }).strict(),
   read_goal_status_details: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   read_cached_goals: z.undefined().optional(),
   read_cached_desires: z.undefined().optional(),
@@ -123,7 +114,6 @@ const primitivePayloadSchemas = {
   reactivate_goal: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   archive_goal: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
   delete_goal: z.object({ goalTitle: nonEmptyString.optional(), goalId: nonEmptyString.optional() }).strict().optional(),
-  delete_goal_api: z.object({ goalId: nonEmptyString }).strict(),
   navigate: z.object({ route: nonEmptyString.optional() }).strict().optional(),
   list_known_actions: z.object({ route: nonEmptyString.optional() }).strict().optional(),
   invoke_known_action: recordPayloadSchema
