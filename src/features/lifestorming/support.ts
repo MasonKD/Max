@@ -39,11 +39,16 @@ export function createLifestormingSupport(deps: LifestormingSupportDeps) {
     async resolveRowByText(text: string, required = true): Promise<Locator | null> {
       const page = deps.pageOrThrow();
       const node = page.getByText(text, { exact: false }).first();
-      if ((await node.count()) === 0) {
-        if (!required) return null;
-        throw new Error(`could not locate text: ${text}`);
+      if ((await node.count()) > 0) {
+        return node.locator("xpath=ancestor::*[self::div or self::li or self::article or self::section][1]");
       }
-      return node.locator("xpath=ancestor::*[self::div or self::li or self::article or self::section][1]");
+      const escaped = text.replace(/"/g, '\\"');
+      const xpath = page.locator(`xpath=//*[contains(normalize-space(.), "${escaped}")]`).first();
+      if ((await xpath.count()) > 0) {
+        return xpath.locator("xpath=ancestor::*[self::div or self::li or self::article or self::section][1]");
+      }
+      if (!required) return null;
+      throw new Error(`could not locate text: ${text}`);
     }
   };
 }

@@ -1,13 +1,13 @@
 import type { Locator, Page } from "playwright";
-import { config } from "./config.js";
-import { readBodySnippet } from "./diagnostics.js";
-import { extractGoalWorkspaceSnapshot } from "./goals.js";
-import { extractTaskItemsFromGoalPage } from "./extractors.js";
-import type { SearchRoot } from "./navigation.js";
-import { goalIdFromUrl, normalizeDateInput, titleCase } from "./navigation.js";
-import { StateError } from "./recovery.js";
-import { selectors, textSelectors } from "./selectors.js";
-import type { GoalStatusBlock, TaskItem } from "./types.js";
+import { config } from "../../core/config.js";
+import { readBodySnippet } from "../../platform/diagnostics.js";
+import { extractGoalWorkspaceSnapshot } from "./workspace.js";
+import { extractTaskItemsFromGoalPage } from "../../platform/extractors.js";
+import type { SearchRoot } from "../../platform/navigation.js";
+import { goalIdFromUrl, normalizeDateInput, titleCase } from "../../platform/navigation.js";
+import { StateError } from "../../core/recovery.js";
+import { selectors, textSelectors } from "../../platform/selectors.js";
+import type { GoalStatusBlock, TaskItem } from "../../core/types.js";
 
 export type GoalsSupportDeps = {
   pageOrThrow: () => Page;
@@ -34,6 +34,39 @@ type FirestoreAuthContext = {
   userId: string;
   accessToken: string;
 };
+
+function simplifyFirestoreValue(value: any): any {
+  if (!value || typeof value !== "object") return value;
+  if ("stringValue" in value) return value.stringValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return Number(value.doubleValue);
+  if ("booleanValue" in value) return Boolean(value.booleanValue);
+  if ("timestampValue" in value) return value.timestampValue;
+  if ("nullValue" in value) return null;
+  if ("mapValue" in value) {
+    const fields = value.mapValue?.fields ?? {};
+    return Object.fromEntries(Object.entries(fields).map(([key, item]) => [key, simplifyFirestoreValue(item)]));
+  }
+  if ("arrayValue" in value) {
+    const values = Array.isArray(value.arrayValue?.values) ? value.arrayValue.values : [];
+    return values.map(simplifyFirestoreValue);
+  }
+  if ("referenceValue" in value) return value.referenceValue;
+  if ("geoPointValue" in value) return value.geoPointValue;
+  if ("bytesValue" in value) return value.bytesValue;
+  return value;
+}
+
+function simplifyFirestoreDocument(doc: any): any {
+  if (!doc || typeof doc !== "object") return doc;
+  const fields = doc.fields && typeof doc.fields === "object" ? doc.fields : {};
+  return {
+    name: typeof doc.name === "string" ? doc.name : undefined,
+    createTime: typeof doc.createTime === "string" ? doc.createTime : undefined,
+    updateTime: typeof doc.updateTime === "string" ? doc.updateTime : undefined,
+    fields: Object.fromEntries(Object.entries(fields).map(([key, item]) => [key, simplifyFirestoreValue(item)]))
+  };
+}
 
 export function createGoalsSupport(deps: GoalsSupportDeps) {
   let firestoreAuthCache: FirestoreAuthContext | null = null;
@@ -320,6 +353,152 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       }
     },
 
+    async updateGoalDueDateViaFirestore(goalId: string, dueDateIso: string): Promise<boolean> {
+      const auth = await this.getFirestoreAuthContext();
+      const tempPage = await deps.pageOrThrow().context().newPage();
+      try {
+        await tempPage.goto("about:blank").catch(() => undefined);
+        return await tempPage.evaluate(async ({ projectId, userId, accessToken, goalId: desiredGoalId, dueDate }) => {
+          const headers = {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          };
+          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/desires/${desiredGoalId}`;
+          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              writes: [
+                {
+                  update: {
+                    name: docName,
+                    fields: {
+                      dueDate: { timestampValue: dueDate }
+                    }
+                  },
+                  updateMask: {
+                    fieldPaths: ["dueDate"]
+                  },
+                  currentDocument: {
+                    exists: true
+                  }
+                }
+              ]
+            })
+          });
+          if (!commitRes.ok) {
+            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
+          }
+          return true;
+        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, goalId, dueDate: dueDateIso });
+      } finally {
+        await tempPage.close().catch(() => undefined);
+      }
+    },
+
+    async updateDesireNotesViaFirestore(desireId: string, notes: string): Promise<boolean> {
+      const auth = await this.getFirestoreAuthContext();
+      const tempPage = await deps.pageOrThrow().context().newPage();
+      try {
+        await tempPage.goto("about:blank").catch(() => undefined);
+        return await tempPage.evaluate(async ({ projectId, userId, accessToken, desireId: requestedId, notes: nextNotes }) => {
+          const headers = {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          };
+          const docName = `projects/${projectId}/databases/(default)/documents/users/${userId}/lifestormDesires/${requestedId}`;
+          const commitRes = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents:commit`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              writes: [
+                {
+                  update: {
+                    name: docName,
+                    fields: {
+                      notes: { stringValue: nextNotes }
+                    }
+                  },
+                  updateMask: {
+                    fieldPaths: ["notes"]
+                  },
+                  currentDocument: {
+                    exists: true
+                  }
+                }
+              ]
+            })
+          });
+          if (!commitRes.ok) {
+            throw new Error(`commit failed (${commitRes.status}): ${await commitRes.text()}`);
+          }
+          return true;
+        }, { projectId: auth.projectId, userId: auth.userId, accessToken: auth.accessToken, desireId, notes });
+      } finally {
+        await tempPage.close().catch(() => undefined);
+      }
+    },
+
+    async readFirestoreDocument(documentPath: string): Promise<unknown> {
+      const auth = await this.getFirestoreAuthContext();
+      const tempPage = await deps.pageOrThrow().context().newPage();
+      try {
+        await tempPage.goto("about:blank").catch(() => undefined);
+        return await tempPage.evaluate(async ({ projectId, accessToken, documentPath: requestedPath }) => {
+          const headers = {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          };
+          const res = await fetch(`https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents/${requestedPath}`, {
+            method: "GET",
+            headers
+          });
+          const text = await res.text();
+          let body: unknown = text;
+          try {
+            body = JSON.parse(text);
+          } catch {
+          }
+          return {
+            ok: res.ok,
+            status: res.status,
+            body
+          };
+        }, { projectId: auth.projectId, accessToken: auth.accessToken, documentPath });
+      } finally {
+        await tempPage.close().catch(() => undefined);
+      }
+    },
+
+    async readGoalFirestoreDocuments(goalId: string): Promise<{
+      desireDoc: unknown;
+      summaryDoc: unknown;
+      candidateDocs: Array<{ path: string; result: unknown }>;
+    }> {
+      const auth = await this.getFirestoreAuthContext();
+      const candidates = [
+        `users/${auth.userId}/desires/${goalId}`,
+        `users/${auth.userId}/selfMaximizeSummaries/${goalId}`,
+        `users/${auth.userId}/goals/${goalId}`,
+        `users/${auth.userId}/selfMaximize/${goalId}`
+      ];
+      const results: Array<{ path: string; result: unknown }> = [];
+      for (const path of candidates) {
+        const result = await this.readFirestoreDocument(path);
+        results.push({ path, result });
+      }
+      const desireRaw = results.find((item) => item.path.includes("/desires/"))?.result as { ok?: boolean; body?: any } | undefined;
+      const summaryRaw = results.find((item) => item.path.includes("/selfMaximizeSummaries/"))?.result as { ok?: boolean; body?: any } | undefined;
+      return {
+        desireDoc: desireRaw?.ok ? simplifyFirestoreDocument(desireRaw.body) : desireRaw,
+        summaryDoc: summaryRaw?.ok ? simplifyFirestoreDocument(summaryRaw.body) : summaryRaw,
+        candidateDocs: results.map((item) => ({
+          path: item.path,
+          result: (item.result as { ok?: boolean; body?: any })?.ok ? simplifyFirestoreDocument((item.result as { body?: any }).body) : item.result
+        }))
+      };
+    },
+
     async waitForTaskDocumentWrite(goalId: string, taskText: string, timeoutMs = 4000): Promise<string | null> {
       const page = deps.pageOrThrow();
       return new Promise<string | null>((resolve) => {
@@ -522,7 +701,13 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
     async isGoalContextOpen(goalTitle?: string): Promise<boolean> {
       const page = deps.pageOrThrow();
-      if (page.url().includes("/self-maximize")) return true;
+      if (page.url().includes("/self-maximize")) {
+        if (!goalTitle) return true;
+        const goalText = page.getByText(goalTitle, { exact: false }).first();
+        if ((await goalText.count()) > 0) return true;
+        const bodyText = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
+        return bodyText.includes(goalTitle);
+      }
       const currentGoal = page.getByText(/Current Goal/i).first();
       if ((await currentGoal.count()) === 0) return false;
       if (!goalTitle) return true;
@@ -577,6 +762,52 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
     normalizeDateInput(input: string): string | null {
       return normalizeDateInput(input);
+    },
+
+    formatGoalDueLabel(input: string): string | null {
+      const normalized = normalizeDateInput(input);
+      if (!normalized) return null;
+      const [year, month, day] = normalized.split("-").map((part) => Number(part));
+      if (!year || !month || !day) return null;
+      return `Due ${String(month).padStart(2, "0")}/${String(day).padStart(2, "0")}/${String(year % 100).padStart(2, "0")}`;
+    },
+
+    async updateGoalDueDateFromGoals(goalTitle: string, dueDateInput: string): Promise<boolean> {
+      const normalized = normalizeDateInput(dueDateInput);
+      if (!normalized) throw new Error(`invalid due date: ${dueDateInput}`);
+      await deps.ensureOnGoals();
+      const card = await this.resolveGoalCard(goalTitle);
+      if (!card) return false;
+      const dueNode = card.getByText(/^Due\s/i).first();
+      if ((await dueNode.count()) === 0) return false;
+      await dueNode.click({ timeout: 1500 }).catch(() => undefined);
+      const page = deps.pageOrThrow();
+      const deadline = Date.now() + 2500;
+      while (Date.now() < deadline) {
+        const dateInput = page.locator('input[type="date"]').filter({ hasNotText: "Type your message" }).first();
+        if ((await dateInput.count()) > 0 && (await dateInput.isVisible().catch(() => false))) {
+          await dateInput.fill(normalized);
+          await dateInput.press("Enter").catch(() => undefined);
+          await page.keyboard.press("Tab").catch(() => undefined);
+          const expectedLabel = this.formatGoalDueLabel(normalized);
+          if (!expectedLabel) return true;
+          const updated = await this.waitForGoalDueLabel(goalTitle, expectedLabel, 2500);
+          return updated;
+        }
+        await page.waitForTimeout(200);
+      }
+      return false;
+    },
+
+    async waitForGoalDueLabel(goalTitle: string, expectedLabel: string, timeoutMs = 2500): Promise<boolean> {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const card = await this.resolveGoalCard(goalTitle);
+        const text = ((await card?.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+        if (text.includes(expectedLabel)) return true;
+        await deps.pageOrThrow().waitForTimeout(200);
+      }
+      return false;
     },
 
     async resolveTaskInput(): Promise<Locator> {

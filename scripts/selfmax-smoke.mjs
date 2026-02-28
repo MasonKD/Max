@@ -54,6 +54,26 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (token === "--name") {
+      args.name = argv[i + 1] ?? "";
+      i += 1;
+      continue;
+    }
+    if (token === "--payload-json") {
+      args.payloadJson = argv[i + 1] ?? "";
+      i += 1;
+      continue;
+    }
+    if (token === "--status") {
+      args.status = argv[i + 1] ?? "";
+      i += 1;
+      continue;
+    }
+    if (token === "--due-date") {
+      args.dueDate = argv[i + 1] ?? "";
+      i += 1;
+      continue;
+    }
   }
   return args;
 }
@@ -65,6 +85,12 @@ function summarize(result) {
     error: result.error ?? null,
     result: result.result ?? null
   };
+}
+
+function nextIsoDate(daysFromToday = 0) {
+  const value = new Date();
+  value.setUTCDate(value.getUTCDate() + daysFromToday);
+  return value.toISOString().slice(0, 10);
 }
 
 function isActiveGoalLimitError(result) {
@@ -88,10 +114,89 @@ async function findSafeGoalTitle(client, session) {
   return safeGoal.title;
 }
 
+async function readBodyText(client) {
+  const page = client.page ?? client["page"];
+  if (!page) {
+    throw new Error("page unavailable");
+  }
+  return page.locator("body").innerText().catch(() => "");
+}
+
+async function waitForBodyIncludes(client, needles, timeoutMs = 6000) {
+  const page = client.page ?? client["page"];
+  if (!page) {
+    throw new Error("page unavailable");
+  }
+  const expected = needles.filter((value) => typeof value === "string" && value.trim().length > 0);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const text = await readBodyText(client);
+    if (expected.every((needle) => text.includes(needle))) {
+      return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
+async function runStep(client, session, steps, step) {
+  const res = await client.execute(step, session);
+  const row = { step: step.name, ...summarize(res) };
+  steps.push(row);
+  return res;
+}
+
+async function findActiveGoalByState(client, session, desiredState, predicate = () => true) {
+  const listed = await client.execute({ id: `list-${desiredState}`, name: "list_goals", payload: { filter: "active" } }, session);
+  if (!listed.ok) {
+    throw new Error(listed.error ?? "list_goals failed while resolving active goal");
+  }
+  const goals = Array.isArray(listed.result?.goals) ? listed.result.goals : [];
+  return goals.find((goal) => goal?.taskPanelState === desiredState && predicate(goal)) ?? null;
+}
+
+async function ensureGoalCapacity(client, session, steps, slotsNeeded = 1) {
+  const auth = await client.execute({ id: "auth-state", name: "read_auth_state" }, session);
+  steps.push({ step: "read_auth_state", ...summarize(auth) });
+  if (!auth.ok) {
+    throw new Error(auth.error ?? "read_auth_state failed");
+  }
+  let activeCount = Number(auth.result?.activeCount ?? 0);
+  const archivedTitles = [];
+  while (activeCount + slotsNeeded > 10) {
+    const safeGoalTitle = await findSafeGoalTitle(client, session);
+    const archiveRes = await client.execute({ id: `archive-capacity-${archivedTitles.length}`, name: "archive_goal", payload: { goalTitle: safeGoalTitle } }, session);
+    steps.push({ step: "archive_goal_for_capacity", ...summarize(archiveRes) });
+    if (!archiveRes.ok) {
+      throw new Error(archiveRes.error ?? `could not archive safe goal for capacity: ${safeGoalTitle}`);
+    }
+    archivedTitles.push(safeGoalTitle);
+    activeCount -= 1;
+  }
+  return { archivedTitles };
+}
+
 async function runRecoverableSequence(client, session, { goalTitle, task, message, loginFirst = true }) {
   const steps = [];
   let workingGoalTitle = goalTitle;
+  let chatGoalTitle = goalTitle;
+  let taskGoalTitle = goalTitle;
+  let lifecycleGoalTitle = goalTitle;
   let workingTaskText = task;
+  const runStamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const directGoalTitle = goalTitle;
+  const lifestormGoalTitle = `Lifestorm Goal ${runStamp}`;
+  const brainstormMeaning = `Lifestorm Desire Meaning ${runStamp}`;
+  const brainstormHealth = `Lifestorm Desire Health ${runStamp}`;
+  const guideMessageA = `${message} [guide-a ${runStamp}]`;
+  const guideMessageB = `${message} [guide-b ${runStamp}]`;
+  const goalMessageA = `Goal chat ping A ${runStamp}`;
+  const goalMessageB = `Goal chat ping B ${runStamp}`;
+  const reflectionNotes = `Reflection by title ${runStamp}`;
+  let directGoalCreated = false;
+  let lifestormGoalCreated = false;
+  const createDueDate = nextIsoDate(7);
+  const lifestormDueDate = nextIsoDate(10);
 
   if (loginFirst) {
     const loginStep = { id: "1", name: "login" };
@@ -101,38 +206,226 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
       return steps;
     }
   }
-  const talkStep = { id: "2", name: "talk_to_guide", payload: { message } };
-  const talkRes = await client.execute(talkStep, session);
-  steps.push({ step: talkStep.name, ...summarize(talkRes) });
-  if (!talkRes.ok) {
+  const guideTalkA = await runStep(client, session, steps, { id: "2a", name: "talk_to_guide", payload: { message: guideMessageA } });
+  if (!guideTalkA.ok) {
     return steps;
   }
+  const guideReadA = await runStep(client, session, steps, { id: "2ar", name: "read_coach_messages" });
+  const guideTalkB = await runStep(client, session, steps, { id: "2b", name: "talk_to_guide", payload: { message: guideMessageB } });
+  if (!guideTalkB.ok) {
+    return steps;
+  }
+  const guideReadB = await runStep(client, session, steps, { id: "2br", name: "read_coach_messages" });
+  if (!guideReadA.ok || !guideReadB.ok) {
+    return steps;
+  }
+  steps.push({
+    step: "guide_chat_continuity",
+    id: "2c",
+    ok: Array.isArray(guideReadB.result) && guideReadB.result.length >= (Array.isArray(guideReadA.result) ? guideReadA.result.length : 0),
+    error: null,
+    result: {
+      firstReadCount: Array.isArray(guideReadA.result) ? guideReadA.result.length : 0,
+      secondReadCount: Array.isArray(guideReadB.result) ? guideReadB.result.length : 0
+    }
+  });
 
-  const createStep = { id: "3", name: "create_goal", payload: { title: goalTitle, category: "Meaning" } };
-  const createRes = await client.execute(createStep, session);
-  steps.push({ step: createStep.name, ...summarize(createRes) });
-
-  if (createRes.ok) {
-    workingGoalTitle = goalTitle;
-  } else if (isActiveGoalLimitError(createRes)) {
-    workingGoalTitle = await findSafeGoalTitle(client, session);
-    steps.push({
-      step: "sequence_recovery",
-      id: "3r",
-      ok: true,
-      error: null,
-      result: {
-        reason: "active_goal_limit",
-        usingExistingGoalTitle: workingGoalTitle
+  const brainstormRes = await runStep(client, session, steps, {
+    id: "3",
+    name: "brainstorm_desires_for_each_category",
+    payload: {
+      itemsByCategory: {
+        meaning: [brainstormMeaning],
+        health: [brainstormHealth]
       }
+    }
+  });
+  if (!brainstormRes.ok) {
+    return steps;
+  }
+  const lifestormMeaning = await runStep(client, session, steps, {
+    id: "3m",
+    name: "read_lifestorming_category",
+    payload: { category: "meaning" }
+  });
+  const lifestormHealth = await runStep(client, session, steps, {
+    id: "3h",
+    name: "read_lifestorming_category",
+    payload: { category: "health" }
+  });
+  steps.push({
+    step: "brainstorm_verify",
+    id: "3v",
+    ok:
+      Array.isArray(lifestormMeaning.result?.items) &&
+      lifestormMeaning.result.items.includes(brainstormMeaning) &&
+      Array.isArray(lifestormHealth.result?.items) &&
+      lifestormHealth.result.items.includes(brainstormHealth),
+    error: null,
+    result: {
+      meaningFound: Array.isArray(lifestormMeaning.result?.items) ? lifestormMeaning.result.items.includes(brainstormMeaning) : false,
+      healthFound: Array.isArray(lifestormHealth.result?.items) ? lifestormHealth.result.items.includes(brainstormHealth) : false
+    }
+  });
+
+  const feelOut = await runStep(client, session, steps, {
+    id: "4",
+    name: "feel_out_desires",
+    payload: { desires: [{ title: "Begin praying every day", notes: reflectionNotes }] }
+  });
+  if (!feelOut.ok) {
+    return steps;
+  }
+  const feelOutRead = await runStep(client, session, steps, {
+    id: "4r",
+    name: "read_sensation_practice",
+    payload: { desireTitle: "Begin praying every day" }
+  });
+  steps.push({
+    step: "feel_out_persistence",
+    id: "4v",
+    ok: String(feelOutRead.result?.noteText ?? "").includes(reflectionNotes),
+    error: null,
+    result: {
+      expected: reflectionNotes,
+      actual: feelOutRead.result?.noteText ?? ""
+    }
+  });
+
+  await ensureGoalCapacity(client, session, steps, 1);
+  const lifestormCreate = await runStep(client, session, steps, {
+    id: "5",
+    name: "create_goals_from_desires",
+    payload: { desires: [{ title: lifestormGoalTitle, category: "Meaning", dueDate: lifestormDueDate }] }
+  });
+  if (lifestormCreate.ok) {
+    lifestormGoalCreated = true;
+  } else if (isActiveGoalLimitError(lifestormCreate)) {
+    await ensureGoalCapacity(client, session, steps, 1);
+    const retry = await runStep(client, session, steps, {
+      id: "5r",
+      name: "create_goals_from_desires",
+      payload: { desires: [{ title: lifestormGoalTitle, category: "Meaning", dueDate: lifestormDueDate }] }
     });
+    lifestormGoalCreated = retry.ok;
+    if (!retry.ok) {
+      return steps;
+    }
   } else {
     return steps;
   }
 
+  await ensureGoalCapacity(client, session, steps, 1);
+  const createStep = { id: "6", name: "create_goal", payload: { title: directGoalTitle, category: "Meaning", dueDate: createDueDate } };
+  const createRes = await client.execute(createStep, session);
+  steps.push({ step: createStep.name, ...summarize(createRes) });
+
+  if (createRes.ok) {
+    directGoalCreated = true;
+  } else if (isActiveGoalLimitError(createRes)) {
+    await ensureGoalCapacity(client, session, steps, 1);
+    const retry = await client.execute({ ...createStep, id: "6r" }, session);
+    steps.push({ step: "create_goal_retry", ...summarize(retry) });
+    if (retry.ok) {
+      directGoalCreated = true;
+    } else {
+      steps.push({
+        step: "sequence_recovery",
+        id: "6rr",
+        ok: true,
+        error: null,
+        result: {
+          reason: "active_goal_limit"
+        }
+      });
+    }
+  } else {
+    return steps;
+  }
+
+  const activeGoalsAfterCreate = await runStep(client, session, steps, { id: "6v", name: "list_goals", payload: { filter: "active" } });
+  directGoalCreated =
+    directGoalCreated &&
+    Array.isArray(activeGoalsAfterCreate.result?.goals) &&
+    activeGoalsAfterCreate.result.goals.some((goal) => goal?.title === directGoalTitle);
+  lifestormGoalCreated =
+    lifestormGoalCreated &&
+    Array.isArray(activeGoalsAfterCreate.result?.goals) &&
+    activeGoalsAfterCreate.result.goals.some((goal) => goal?.title === lifestormGoalTitle);
+
+  chatGoalTitle = lifestormGoalCreated ? lifestormGoalTitle : (directGoalCreated ? directGoalTitle : workingGoalTitle);
+  lifecycleGoalTitle = directGoalCreated ? directGoalTitle : chatGoalTitle;
+  const safeTaskGoal =
+    (await findActiveGoalByState(client, session, "tasks_present", (goal) => typeof goal?.title === "string" && goal.title.includes("MVP Automation Goal"))) ??
+    (await findActiveGoalByState(client, session, "tasks_present")) ??
+    (await findActiveGoalByState(client, session, "add_tasks", (goal) => typeof goal?.title === "string" && goal.title.includes("MVP Automation Goal"))) ??
+    (await findActiveGoalByState(client, session, "add_tasks"));
+  taskGoalTitle = safeTaskGoal?.title ?? lifecycleGoalTitle;
+
+  const directGoalStart = await runStep(client, session, steps, { id: "7", name: "start_goal", payload: { goalTitle: chatGoalTitle } });
+  if (!directGoalStart.ok) {
+    return steps;
+  }
+  const goalChatA = await runStep(client, session, steps, { id: "7a", name: "talk_to_goal_chat", payload: { goalTitle: chatGoalTitle, message: goalMessageA } });
+  const goalChatB = await runStep(client, session, steps, { id: "7b", name: "talk_to_goal_chat", payload: { goalTitle: chatGoalTitle, message: goalMessageB } });
+  if (!goalChatA.ok || !goalChatB.ok) {
+    return steps;
+  }
+  const goalChatReadA = await runStep(client, session, steps, { id: "7c", name: "read_goal_chat", payload: { goalTitle: chatGoalTitle } });
+  await runStep(client, session, steps, { id: "7d", name: "navigate", payload: { route: "goals" } });
+  await runStep(client, session, steps, { id: "7e", name: "start_goal", payload: { goalTitle: chatGoalTitle } });
+  const goalChatReadB = await runStep(client, session, steps, { id: "7f", name: "read_goal_chat", payload: { goalTitle: chatGoalTitle } });
+  steps.push({
+    step: "goal_chat_persistence",
+    id: "7g",
+    ok:
+      Array.isArray(goalChatReadA.result?.messages) &&
+      Array.isArray(goalChatReadB.result?.messages) &&
+      goalChatReadA.result.messages.length > 0 &&
+      goalChatReadB.result.messages.length >= goalChatReadA.result.messages.length,
+    error: null,
+    result: {
+      firstReadCount: Array.isArray(goalChatReadA.result?.messages) ? goalChatReadA.result.messages.length : 0,
+      secondReadCount: Array.isArray(goalChatReadB.result?.messages) ? goalChatReadB.result.messages.length : 0,
+      bodyContainsSentMessages: await waitForBodyIncludes(client, [goalMessageA, goalMessageB], 2000).catch(() => false)
+    }
+  });
+
+  const statusRead = await runStep(client, session, steps, { id: "8", name: "read_goal_status_details", payload: { goalTitle: chatGoalTitle } });
+  steps.push({
+    step: "goal_status_verify",
+    id: "8v",
+    ok:
+      Array.isArray(statusRead.result?.details) &&
+      statusRead.result.details.length === 6 &&
+      statusRead.result.details.every((detail) => typeof detail.tooltip === "string"),
+    error: null,
+    result: {
+      detailCount: Array.isArray(statusRead.result?.details) ? statusRead.result.details.length : 0
+    }
+  });
+
+  const suggestionGoal = (await findActiveGoalByState(client, session, "add_tasks")) ?? (await findActiveGoalByState(client, session, "tasks_present"));
+  if (suggestionGoal?.title) {
+    const suggestionsRead = await runStep(client, session, steps, {
+      id: "9",
+      name: "read_task_suggestions",
+      payload: { goalTitle: suggestionGoal.title }
+    });
+    const suggestions = Array.isArray(suggestionsRead.result?.suggestions) ? suggestionsRead.result.suggestions.filter((item) => typeof item === "string" && item.trim().length > 0) : [];
+    if (suggestions.length > 0) {
+      const pick = suggestions.slice(0, 2);
+      await runStep(client, session, steps, {
+        id: "9a",
+        name: "add_tasks",
+        payload: { goalTitle: suggestionGoal.title, tasks: pick, useSuggestions: true }
+      });
+    }
+  }
+
   const followup = [
-    { id: "4", name: "start_goal", payload: { goalTitle: workingGoalTitle } },
-    { id: "5", name: "add_tasks", payload: { goalTitle: workingGoalTitle, tasks: [workingTaskText] } }
+    { id: "10", name: "start_goal", payload: { goalTitle: taskGoalTitle } },
+    { id: "11", name: "add_tasks", payload: { goalTitle: taskGoalTitle, tasks: [workingTaskText] } }
   ];
 
   for (const step of followup) {
@@ -150,10 +443,11 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
   }
 
   const tail = [
-    { id: "6", name: "complete_task", payload: { goalTitle: workingGoalTitle, taskText: workingTaskText } },
-    { id: "7", name: "uncomplete_task", payload: { goalTitle: workingGoalTitle, taskText: workingTaskText } },
-    { id: "8", name: "remove_task", payload: { goalTitle: workingGoalTitle, taskText: workingTaskText } },
-    { id: "9", name: "archive_goal", payload: { goalTitle: workingGoalTitle } }
+    { id: "12", name: "complete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
+    { id: "13", name: "uncomplete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
+    { id: "14", name: "remove_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
+    { id: "15", name: "complete_goal", payload: { goalTitle: lifecycleGoalTitle } },
+    { id: "16", name: "reactivate_goal", payload: { goalTitle: lifecycleGoalTitle } }
   ];
 
   for (const step of tail) {
@@ -162,6 +456,15 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
     if (!res.ok) {
       break;
     }
+  }
+
+  if (directGoalCreated) {
+    const archiveDirect = await client.execute({ id: "17", name: "archive_goal", payload: { goalTitle: directGoalTitle } }, session);
+    steps.push({ step: "archive_direct_goal_cleanup", ...summarize(archiveDirect) });
+  }
+  if (lifestormGoalCreated) {
+    const archiveLifestorm = await client.execute({ id: "18", name: "archive_goal", payload: { goalTitle: lifestormGoalTitle } }, session);
+    steps.push({ step: "archive_lifestorm_goal_cleanup", ...summarize(archiveLifestorm) });
   }
 
   return steps;
@@ -346,6 +649,10 @@ async function inspectCurrentPageRoles(page) {
   });
 }
 
+async function inspectCurrentPageText(page) {
+  return page.locator("body").innerText().catch(() => "");
+}
+
 async function capturePrimitiveNetwork(client, session, req) {
   await ensureLoggedIn(client, session);
   const page = client.page ?? client["page"];
@@ -389,6 +696,45 @@ async function capturePrimitiveNetwork(client, session, req) {
   } finally {
     page.off("request", onRequest);
     page.off("response", onResponse);
+  }
+}
+
+async function captureContextNetwork(context, fn) {
+  const events = [];
+  const onRequest = (request) => {
+    const url = request.url();
+    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    events.push({
+      type: "request",
+      method: request.method(),
+      url,
+      postData: request.postData() ? request.postData().slice(0, 4000) : undefined
+    });
+  };
+  const onResponse = async (response) => {
+    const url = response.url();
+    if (!/selfmax\.ai|firestore|firebase|googleapis|api/i.test(url)) return;
+    let body;
+    try {
+      body = await response.text();
+    } catch {
+      body = undefined;
+    }
+    events.push({
+      type: "response",
+      status: response.status(),
+      url,
+      body: body ? body.slice(0, 4000) : undefined
+    });
+  };
+  context.on("request", onRequest);
+  context.on("response", onResponse);
+  try {
+    const result = await fn();
+    return { result, events };
+  } finally {
+    context.off("request", onRequest);
+    context.off("response", onResponse);
   }
 }
 
@@ -461,10 +807,10 @@ async function openGoalWorkspaceEdit(client, session, goalTitle) {
   return page;
 }
 
-async function openGoalWorkspaceStatus(client, session, goalTitle) {
+async function openGoalWorkspaceStatus(client, session, goalTitle, goalId) {
   await ensureLoggedIn(client, session);
   const started = await client.execute(
-    { id: "inspect-open-goal", name: "start_goal", payload: { goalTitle } },
+    { id: "inspect-open-goal", name: "start_goal", payload: { goalTitle, goalId } },
     session
   );
   if (!started.ok) {
@@ -541,6 +887,13 @@ async function runClientMode(args) {
     if (args.mode === "complete-goal") {
       await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "complete-goal", name: "complete_goal", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "reactivate-goal") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "reactivate-goal", name: "reactivate_goal", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -750,6 +1103,24 @@ async function runClientMode(args) {
       return;
     }
 
+    if (args.mode === "feel-out-desires") {
+      await ensureLoggedIn(client, session);
+      const title = args.desireTitle ?? "";
+      if (!title) {
+        throw new Error("feel-out-desires requires --desire-title");
+      }
+      const res = await client.execute(
+        {
+          id: "feel-out-desires",
+          name: "feel_out_desires",
+          payload: { desires: [{ title, notes: args.message ?? `Reflection for ${title}` }] }
+        },
+        session
+      );
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
     if (args.mode === "read-tasks") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
@@ -848,7 +1219,120 @@ async function runClientMode(args) {
       console.log(JSON.stringify({
         buttons: await inspectCurrentPageButtons(page),
         roles: await inspectCurrentPageRoles(page),
+        inputs: await page.evaluate(() =>
+          Array.from(document.querySelectorAll("textarea, input, [contenteditable='true'], [role='textbox']"))
+            .map((el) => ({
+              tag: el.tagName.toLowerCase(),
+              role: el.getAttribute("role") || "",
+              placeholder: el.getAttribute("placeholder") || "",
+              value: "value" in el ? String(el.value ?? "") : ((el.textContent || "").trim()),
+              className: (el.getAttribute("class") || "").slice(0, 300)
+            }))
+        ),
         snippet: await page.locator("body").innerText().catch(() => "")
+      }));
+      return;
+    }
+
+    if (args.mode === "task-suggestions-inspect") {
+      const goalTitleToInspect = args.goalTitle ?? "";
+      if (!goalTitleToInspect) {
+        throw new Error("task-suggestions-inspect requires --goal-title");
+      }
+      await ensureLoggedIn(client, session);
+      await client.execute(
+        { id: "inspect-open-goal", name: "start_goal", payload: { goalTitle: goalTitleToInspect } },
+        session
+      );
+      await client.execute(
+        { id: "inspect-open-tasks", name: "read_task_panel_snapshot", payload: { goalTitle: goalTitleToInspect } },
+        session
+      );
+      const page = client.page ?? client["page"];
+      if (!page) throw new Error("page unavailable");
+      await page.getByText(/Use the task suggestion tool/i).first().click().catch(() => undefined);
+      await page.waitForTimeout(800);
+      console.log(JSON.stringify({
+        text: await inspectCurrentPageText(page),
+        buttons: await inspectCurrentPageButtons(page),
+        roles: await inspectCurrentPageRoles(page)
+      }));
+      return;
+    }
+
+    if (args.mode === "lifestorming-desire-inspect") {
+      const title = args.desireTitle ?? "";
+      if (!title) {
+        throw new Error("lifestorming-desire-inspect requires --desire-title");
+      }
+      await ensureLoggedIn(client, session);
+      const page = client.page ?? client["page"];
+      if (!page) throw new Error("page unavailable");
+      await page.goto("https://www.selfmax.ai/lifestorming", { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(1000);
+      const output = await page.evaluate((needle) => {
+        const normalize = (value) => value.replace(/\s+/g, " ").trim();
+        const row = Array.from(document.querySelectorAll("ul li, ol li"))
+          .find((el) => normalize(el.textContent || "").includes(needle) && /GO|VIEW|OPEN/i.test(normalize(el.textContent || "")));
+        const matches = Array.from(document.querySelectorAll("body *"))
+          .map((el) => ({
+            tag: el.tagName.toLowerCase(),
+            text: normalize(el.textContent || ""),
+            href: el instanceof HTMLAnchorElement ? el.href : "",
+            role: el.getAttribute("role") || "",
+            className: (el.getAttribute("class") || "").slice(0, 200)
+          }))
+          .filter((item) => item.text && item.text.includes(needle))
+          .slice(0, 40);
+        return {
+          bodyText: normalize(document.body.innerText || ""),
+          matches,
+          rowHtml: row ? row.outerHTML.slice(0, 4000) : null,
+          rowActions: row
+            ? Array.from(row.querySelectorAll("*")).map((el) => ({
+                tag: el.tagName.toLowerCase(),
+                text: normalize(el.textContent || ""),
+                role: el.getAttribute("role") || "",
+                href: el instanceof HTMLAnchorElement ? el.href : "",
+                className: (el.getAttribute("class") || "").slice(0, 200)
+              })).filter((item) => item.text).slice(0, 40)
+            : []
+        };
+      }, title);
+      console.log(JSON.stringify(output));
+      return;
+    }
+
+    if (args.mode === "sensation-practice-inspect") {
+      const title = args.desireTitle ?? "";
+      if (!title) {
+        throw new Error("sensation-practice-inspect requires --desire-title");
+      }
+      await ensureLoggedIn(client, session);
+      await client.execute(
+        {
+          id: "read-sensation-practice",
+          name: "read_sensation_practice",
+          payload: { desireId: args.desireId ?? "", desireTitle: title }
+        },
+        session
+      );
+      const page = client.page ?? client["page"];
+      if (!page) throw new Error("page unavailable");
+      console.log(JSON.stringify({
+        url: page.url(),
+        text: await inspectCurrentPageText(page),
+        buttons: await inspectCurrentPageButtons(page),
+        roles: await inspectCurrentPageRoles(page),
+        inputs: await page.evaluate(() =>
+          Array.from(document.querySelectorAll("textarea, input, [contenteditable='true']"))
+            .map((el) => ({
+              tag: el.tagName.toLowerCase(),
+              value: "value" in el ? el.value : el.textContent || "",
+              placeholder: el.getAttribute("placeholder") || "",
+              className: (el.getAttribute("class") || "").slice(0, 200)
+            }))
+        )
       }));
       return;
     }
@@ -897,6 +1381,131 @@ async function runClientMode(args) {
       return;
     }
 
+    if (args.mode === "probe-complete-goal-network") {
+      const goalTitleToUse = args.goalTitle ?? "";
+      if (!goalTitleToUse) {
+        throw new Error("probe-complete-goal-network requires --goal-title");
+      }
+      const output = await capturePrimitiveNetwork(client, session, {
+        id: "probe-complete-goal-network",
+        name: "complete_goal",
+        payload: { goalTitle: goalTitleToUse }
+      });
+      console.log(JSON.stringify(output));
+      return;
+    }
+
+    if (args.mode === "probe-status-change-network") {
+      const goalTitleToUse = args.goalTitle ?? "";
+      const goalIdToUse = args.goalId ?? "";
+      const statusToUse = (args.status ?? "").toLowerCase();
+      if (!goalTitleToUse || !goalIdToUse || !/^(active|completed|archived)$/.test(statusToUse)) {
+        throw new Error("probe-status-change-network requires --goal-title, --goal-id, and --status active|completed|archived");
+      }
+      await ensureLoggedIn(client, session);
+      const context = client.context ?? client["context"];
+      if (!context) {
+        throw new Error("context unavailable");
+      }
+      const output = await captureContextNetwork(context, async () => {
+        const page = await openGoalWorkspaceStatus(client, session, goalTitleToUse, goalIdToUse);
+        const label = statusToUse === "completed" ? /Mark as Completed/i : statusToUse === "archived" ? /Archive Goal/i : /Mark as Active/i;
+        const item = page.locator('[role="menuitem"]').filter({ hasText: label }).first();
+        if ((await item.count()) > 0 && (await item.isVisible().catch(() => false))) {
+          await item.click({ timeout: 2000 });
+        } else {
+          await page.getByText(label).last().click({ timeout: 2000 });
+        }
+        await page.waitForTimeout(1500);
+        const support = client.goalsSupport ?? client["goalsSupport"];
+        const docs = await support.readGoalFirestoreDocuments(goalIdToUse);
+        return { docs };
+      });
+      console.log(JSON.stringify(output));
+      return;
+    }
+
+    if (args.mode === "probe-sensation-save-network") {
+      const title = args.desireTitle ?? "";
+      if (!title) {
+        throw new Error("probe-sensation-save-network requires --desire-title");
+      }
+      await ensureLoggedIn(client, session);
+      const context = client.context ?? client["context"];
+      if (!context) throw new Error("context unavailable");
+      const output = await captureContextNetwork(context, async () => {
+        const res = await client.execute(
+          {
+            id: "read-sensation-practice",
+            name: "read_sensation_practice",
+            payload: { desireId: args.desireId ?? "", desireTitle: title }
+          },
+          session
+        );
+        if (!res.ok) throw new Error(res.error ?? "could not open sensation practice");
+        const page = client.page ?? client["page"];
+        if (!page) throw new Error("page unavailable");
+        const textarea = page.locator("textarea").first();
+        await textarea.fill(args.message ?? `Probe reflection ${new Date().toISOString()}`);
+        await page.getByText(/^SAVE$/i).first().click();
+        await page.waitForTimeout(1500);
+        return { url: page.url() };
+      });
+      console.log(JSON.stringify(output));
+      return;
+    }
+
+    if (args.mode === "probe-sensation-direct-save-network") {
+      const desireIdToUse = args.desireId ?? "";
+      if (!desireIdToUse) {
+        throw new Error("probe-sensation-direct-save-network requires --desire-id");
+      }
+      await ensureLoggedIn(client, session);
+      const context = client.context ?? client["context"];
+      const page = client.page ?? client["page"];
+      if (!context || !page) throw new Error("context unavailable");
+      const output = await captureContextNetwork(context, async () => {
+        await page.goto(`https://www.selfmax.ai/lifestorming/sensation-practice/${encodeURIComponent(desireIdToUse)}`, { waitUntil: "domcontentloaded" });
+        await page.waitForTimeout(1000);
+        const textarea = page.locator("textarea").first();
+        await textarea.fill(args.message ?? `Probe reflection ${new Date().toISOString()}`);
+        await page.getByText(/^SAVE$/i).first().click();
+        await page.waitForTimeout(1500);
+        return { url: page.url(), text: await page.locator("body").innerText().catch(() => "") };
+      });
+      console.log(JSON.stringify(output));
+      return;
+    }
+
+    if (args.mode === "probe-goal-docs") {
+      await ensureLoggedIn(client, session);
+      const goalIdToUse = args.goalId ?? "";
+      if (!goalIdToUse) {
+        throw new Error("probe-goal-docs requires --goal-id");
+      }
+      const support = client.goalsSupport ?? client["goalsSupport"];
+      if (!support || typeof support.readGoalFirestoreDocuments !== "function") {
+        console.log(JSON.stringify({ supportKeys: support ? Object.keys(support) : null }));
+        throw new Error("goalsSupport.readGoalFirestoreDocuments unavailable");
+      }
+      const docs = await support.readGoalFirestoreDocuments(goalIdToUse);
+      console.log(JSON.stringify(docs));
+      return;
+    }
+
+    if (args.mode === "probe-desire-doc") {
+      await ensureLoggedIn(client, session);
+      const desireIdToUse = args.desireId ?? "";
+      if (!desireIdToUse) {
+        throw new Error("probe-desire-doc requires --desire-id");
+      }
+      const support = client.goalsSupport ?? client["goalsSupport"];
+      const auth = await support.getFirestoreAuthContext();
+      const doc = await support.readFirestoreDocument(`users/${auth.userId}/lifestormDesires/${desireIdToUse}`);
+      console.log(JSON.stringify(doc));
+      return;
+    }
+
     if (args.mode === "probe-goals-listen") {
       const events = await captureGoalsListenTraffic(client, session, args.waitMs ?? 4000);
       console.log(JSON.stringify(events));
@@ -913,6 +1522,54 @@ async function runClientMode(args) {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
         { id: "read-goal-chat", name: "read_goal_chat", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        session
+      );
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-understand-overview") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "read-understand-overview", name: "read_understand_overview" }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-level-check") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "read-level-check", name: "read_level_check" }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-life-history-assessment") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "read-life-history-assessment", name: "read_life_history_assessment" }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-big-five-assessment") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute({ id: "read-big-five-assessment", name: "read_big_five_assessment" }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-goal-status") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute(
+        { id: "read-goal-status", name: "read_goal_status_details", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        session
+      );
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "read-task-suggestions") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute(
+        { id: "read-task-suggestions", name: "read_task_suggestions", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -953,6 +1610,20 @@ async function runClientMode(args) {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
         { id: "remove-task", name: "remove_task", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", taskText: args.task ?? "" } },
+        session
+      );
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "update-goal-due-date") {
+      await ensureLoggedIn(client, session);
+      const res = await client.execute(
+        {
+          id: "update-goal-due-date",
+          name: "update_goal_due_date",
+          payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "", dueDate: args.dueDate ?? nextIsoDate(14) }
+        },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1259,11 +1930,12 @@ async function runCreateGoalPrimitiveInspect(args) {
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const goalTitle = args.goalTitle ?? `MVP Automation Goal ${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const dueDate = args.dueDate ?? nextIsoDate(7);
   try {
     await client.init();
     const login = await client.execute({ id: "1", name: "login" }, session);
     const create = await client.execute(
-      { id: "2", name: "create_goal", payload: { title: goalTitle, category: "Meaning" } },
+      { id: "2", name: "create_goal", payload: { title: goalTitle, category: "Meaning", dueDate } },
       session
     );
     const page = client.page ?? client["page"];
@@ -1308,11 +1980,60 @@ async function runCreateGoalPrimitiveInspect(args) {
   }
 }
 
+async function runUpdateGoalDueDate(args) {
+  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const client = new SelfMaxPlaywrightClient();
+  const session = { sessionId: "smoke-session", userId: "smoke-user" };
+  const dueDate = args.dueDate ?? nextIsoDate(14);
+  try {
+    await client.init();
+    const login = await client.execute({ id: "1", name: "login" }, session);
+    const update = await client.execute(
+      {
+        id: "2",
+        name: "update_goal_due_date",
+        payload: {
+          goalId: args.goalId ?? "",
+          goalTitle: args.goalTitle ?? "",
+          dueDate
+        }
+      },
+      session
+    );
+    console.log(JSON.stringify({ login: summarize(login), update: summarize(update) }));
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
+async function runPrimitiveOnce(args) {
+  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const client = new SelfMaxPlaywrightClient();
+  const session = { sessionId: "smoke-session", userId: "smoke-user" };
+  const primitiveName = args.name ?? "";
+  if (!primitiveName) {
+    throw new Error("primitive mode requires --name");
+  }
+  let payload = {};
+  if (args.payloadJson?.trim()) {
+    payload = JSON.parse(args.payloadJson);
+  }
+  try {
+    await client.init();
+    const login = await client.execute({ id: "1", name: "login" }, session);
+    const result = await client.execute({ id: "2", name: primitiveName, payload }, session);
+    console.log(JSON.stringify({ login: summarize(login), result: summarize(result) }));
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 async function runCreateGoalSubmitProbe(args) {
   const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const goalTitle = args.goalTitle ?? `Probe Goal ${new Date().toISOString().replace(/[:.]/g, "-")}`;
+  const dueDate = args.dueDate ?? nextIsoDate(7);
   try {
     await client.init();
     const login = await client.execute({ id: "1", name: "login" }, session);
@@ -1348,6 +2069,10 @@ async function runCreateGoalSubmitProbe(args) {
     await page.getByRole("button", { name: /NEW GOAL/i }).first().click();
     await page.locator('textarea[placeholder*="E.g." i]').first().fill(goalTitle);
     await page.getByText(/^Meaning$/i).last().click();
+    const dueInput = page.locator('input[type="date"]').first();
+    if ((await dueInput.count()) > 0) {
+      await dueInput.fill(dueDate);
+    }
     await page.getByRole("button", { name: /^Create Goal$/i }).click();
     await page.waitForTimeout(2500);
 
@@ -1355,7 +2080,7 @@ async function runCreateGoalSubmitProbe(args) {
       url: location.href,
       bodyText: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 1400)
     }));
-    console.log(JSON.stringify({ login: summarize(login), goalTitle, createPost, network: network.slice(-30), snapshot }));
+    console.log(JSON.stringify({ login: summarize(login), goalTitle, dueDate, createPost, network: network.slice(-30), snapshot }));
   } finally {
     await client.close().catch(() => undefined);
   }
@@ -1382,6 +2107,10 @@ async function main() {
         "  read-goal-workspace Read visible self-maximize workspace layout",
         "  read-tasks         Read task list for a goal (by goalId/title)",
         "  read-goal-chat     Read goal chat messages (by goalId/title)",
+        "  read-understand-overview Read self-awareness hub cards/activity",
+        "  read-level-check   Read level-check overview/topics",
+        "  read-life-history-assessment Read life-history assessment state",
+        "  read-big-five-assessment Read big-five assessment state",
         "  read-lifestorming-overview Read lifestorming landing overview",
         "  list-desires       Read lifestorming desire buckets/items",
         "  read-desire-category Read a single lifestorming category panel",
@@ -1393,10 +2122,15 @@ async function main() {
         "  create-goal-inspect Inspect create-goal UI after pressing NEW GOAL",
         "  create-goal-primitive-inspect Run create_goal primitive and dump resulting UI state",
         "  create-goal-submit-probe Raw create-goal submit + network probe",
+        "  update-goal-due-date Update an existing goal due date by title or id",
+        "  primitive          Run one primitive once with explicit JSON payload",
         "",
         "Options:",
         "  --goal-title <title>   Goal title for sequence mode",
         "  --goal-id <id>         Goal id for *-by-id modes",
+        "  --name <primitive>     Primitive name for primitive mode",
+        "  --payload-json <json>  JSON payload for primitive mode",
+        "  --due-date <yyyy-mm-dd> Due date for create/update goal modes",
         "  --wait-ms <n>          Extra wait for discovery-style reads",
         "  --task <task>          Task text for sequence mode",
         "  --message <message>    Chat message for guide step",
@@ -1421,7 +2155,9 @@ async function main() {
         "  node scripts/selfmax-smoke.mjs goals-inspect",
         "  node scripts/selfmax-smoke.mjs create-goal-inspect",
         "  node scripts/selfmax-smoke.mjs create-goal-primitive-inspect",
-        "  node scripts/selfmax-smoke.mjs create-goal-submit-probe"
+        "  node scripts/selfmax-smoke.mjs create-goal-submit-probe",
+        "  node scripts/selfmax-smoke.mjs update-goal-due-date --goal-title \"go rock climbing\" --due-date 2026-03-15",
+        "  node scripts/selfmax-smoke.mjs primitive --name create_goal --payload-json '{\"title\":\"x\",\"category\":\"Meaning\",\"dueDate\":\"2026-03-15\"}'"
       ].join("\n") + "\n"
     );
     return;
@@ -1482,6 +2218,16 @@ async function main() {
 
   if (args.mode === "create-goal-submit-probe") {
     await runCreateGoalSubmitProbe(args);
+    return;
+  }
+
+  if (args.mode === "update-goal-due-date") {
+    await runUpdateGoalDueDate(args);
+    return;
+  }
+
+  if (args.mode === "primitive") {
+    await runPrimitiveOnce(args);
     return;
   }
 

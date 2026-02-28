@@ -1,5 +1,5 @@
-import type { GoalStatusBlock, GoalSummary, LifestormingSection } from "./types.js";
-import type { TaskItem } from "./types.js";
+import type { AssessmentQuestionState, GoalStatusBlock, GoalSummary, LifestormingSection, LevelCheckTopic, UnderstandCard } from "../core/types.js";
+import type { TaskItem } from "../core/types.js";
 
 export function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -201,7 +201,7 @@ export function extractLifestormingCategory(text: string, pathname: string): {
   const selectedFromPath = (pathMatch?.[1] || "").toUpperCase();
   const visibleCategories = lines.filter((line) => categories.includes(line.toUpperCase()) && line === line.toUpperCase());
   const selected = categories.includes(selectedFromPath) ? selectedFromPath : visibleCategories[visibleCategories.length - 1] || "";
-  const index = selected ? lines.findIndex((line) => line === selected) : -1;
+  const index = selected ? lines.map((line, position) => ({ line, position })).filter((entry) => entry.line === selected).map((entry) => entry.position).pop() ?? -1 : -1;
   const intro = index !== -1 ? lines.slice(index + 1, index + 4).join(" ") : undefined;
   const items: string[] = [];
 
@@ -223,6 +223,120 @@ export function extractLifestormingCategory(text: string, pathname: string): {
     intro,
     items: [...new Set(items)],
     snippet: normalizeWhitespace(text).slice(0, 900)
+  };
+}
+
+export function extractUnderstandOverview(text: string, links: Array<{ text: string; href: string }> = []): {
+  title?: string;
+  intro?: string;
+  cards: UnderstandCard[];
+  activity: string[];
+  snippet: string;
+} {
+  const lines = splitVisibleLines(text);
+  const titleIndex = lines.findIndex((line) => /SELF-AWARENESS/i.test(line) && /LEARN ABOUT YOURSELF/i.test(line));
+  const intro = titleIndex !== -1 ? lines[titleIndex + 1] : undefined;
+  const contentStartIndex = lines.findIndex((line) => /LEARN ABOUT YOURSELF \+ TELL SELF-MAX HOW TO HELP/i.test(line));
+  const cards: UnderstandCard[] = [];
+  const stopWords = /^(ACTIVITY|Self-Max is an AI-driven|Help|More)$/i;
+  const actionIndices = lines
+    .map((line, index) => ({ line, index }))
+    .filter((entry) => /^(START|RETAKE|RESULTS|LOADING\.\.\.)$/i.test(entry.line));
+  const linkQueue = links.filter((link) => /^(START|Loading\.\.\.)$/i.test(normalizeWhitespace(link.text)));
+  const cardNoise = /^(SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|LEARN ABOUT YOURSELF \+ TELL SELF-MAX HOW TO HELP)$/i;
+
+  for (let position = 0; position < actionIndices.length; position += 1) {
+    const { line: actionLabel, index } = actionIndices[position];
+    const previousActionIndex = position > 0 ? actionIndices[position - 1].index : (contentStartIndex !== -1 ? contentStartIndex : titleIndex);
+    const block = lines
+      .slice((previousActionIndex ?? 0) + 1, index)
+      .filter((line) => !/Help|More/i.test(line))
+      .filter((line) => !cardNoise.test(line));
+    const lastCompleted = block.find((entry) => /^LAST COMPLETED:/i.test(entry));
+    const content = block.filter((entry) => !/^LAST COMPLETED:/i.test(entry) && !/^NEW$/i.test(entry));
+    if (content.length === 0) continue;
+    const title = content[0];
+    const subtitle = content.slice(1).join(" ") || undefined;
+    const href = linkQueue[position]?.href;
+    cards.push({
+      title: href?.includes("/level-check") && /GET TO WORK ON A GOAL/i.test(title) ? "LEVELCHECK" : title,
+      subtitle: href?.includes("/level-check") && /GET TO WORK ON A GOAL/i.test(title) ? "TEST YOUR LEVEL OF THINKING" : subtitle,
+      lastCompleted,
+      actionLabel,
+      href
+    });
+  }
+
+  const activityIndex = lines.findIndex((line) => /^ACTIVITY$/i.test(line));
+  const activity = activityIndex === -1
+    ? []
+    : lines
+        .slice(activityIndex + 1)
+        .filter((line) => !stopWords.test(line))
+        .filter((line) => !/Self-Max is an AI-driven/i.test(line));
+
+  return {
+    title: titleIndex !== -1 ? lines[titleIndex] : undefined,
+    intro,
+    cards: cards.filter((card, index, all) => all.findIndex((candidate) => candidate.title === card.title) === index),
+    activity,
+    snippet: normalizeWhitespace(text).slice(0, 900)
+  };
+}
+
+export function extractLevelCheck(text: string): {
+  title?: string;
+  intro: string[];
+  pdfLabels: string[];
+  concepts: string[];
+  topics: LevelCheckTopic[];
+  snippet: string;
+} {
+  const lines = splitVisibleLines(text);
+  const title = lines.find((line) => /^LEVELCHECK$/i.test(line));
+  const intro = lines.filter((line) => /TEST YOUR LEVEL OF THINKING|LEARN HOW TO GROW YOUR MIND|Talk to LEVELCHECK/i.test(line));
+  const pdfLabels = lines.filter((line) => /^LEVELS /i.test(line));
+  const concepts = lines.filter((line) => /^(COMPLETE|SANCTIFY|HARMONIZE|UNDERSTAND|ACHIEVE|BELONG|CONTROL|CONNECT|SURVIVE)$/i.test(line));
+
+  const topics: LevelCheckTopic[] = [];
+  const candidateTopics = ["Relationships", "Success", "Change", "Rules", "Personal Agency"];
+  for (const topic of candidateTopics) {
+    const actionMatch = text.match(new RegExp(`${topic}\\s+(START|RETAKE|RESULTS)`, "i"));
+    if (actionMatch?.[1]) {
+      topics.push({ domain: "LevelCheck", topic, actionLabel: actionMatch[1].toUpperCase() });
+    }
+  }
+
+  return {
+    title,
+    intro,
+    pdfLabels,
+    concepts,
+    topics: topics.filter((item, index, all) => all.findIndex((candidate) => candidate.domain === item.domain && candidate.topic === item.topic) === index),
+    snippet: normalizeWhitespace(text).slice(0, 900)
+  };
+}
+
+export function extractAssessmentQuestionState(text: string): AssessmentQuestionState {
+  const lines = splitVisibleLines(text);
+  const title = lines.find((line) => /WHO ARE YOU\?|BIG FIVE/i.test(line));
+  const intro = lines.find((line) => /These questions are designed|Test Information|Self-Max will use this information/i.test(line));
+  const progress = lines.find((line) => /^Question\s+\d+\s+of\s+\d+/i.test(line));
+  const progressMatch = progress?.match(/Question\s+(\d+)\s+of\s+(\d+)/i);
+  const prompt = progressMatch ? lines[lines.findIndex((line) => line === progress) + 1] : undefined;
+  const wordsLabel = lines.find((line) => /^Words:\s*\d+\s*\/\s*\d+/i.test(line));
+  const minimumMatch = wordsLabel?.match(/Minimum\s+(\d+)\s+words/i);
+
+  return {
+    title,
+    intro,
+    currentQuestion: progressMatch ? Number(progressMatch[1]) : undefined,
+    totalQuestions: progressMatch ? Number(progressMatch[2]) : undefined,
+    prompt,
+    wordsLabel,
+    minimumWords: minimumMatch ? Number(minimumMatch[1]) : null,
+    placeholder: lines.find((line) => /Type your answer here/i.test(line)),
+    loading: /Loading Test Information/i.test(text)
   };
 }
 

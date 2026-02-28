@@ -2,7 +2,7 @@ import type { Page } from "playwright";
 import { extractGoalsOverview, normalizeWhitespace } from "./extractors.js";
 import { matchKnownRoute } from "./navigation.js";
 import type { KnownRouteId } from "./catalog.js";
-import type { AuthState } from "./types.js";
+import type { AuthState } from "../core/types.js";
 
 export async function readRouteSnapshotDiagnostic(page: Page, auth?: AuthState): Promise<{
   url: string;

@@ -1,4 +1,4 @@
-import { BridgeServer } from "./bridgeServer.js";
+import { BridgeServer } from "./bridge/index.js";
 
 const server = new BridgeServer();
 

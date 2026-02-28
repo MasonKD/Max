@@ -1,11 +1,13 @@
 import type { Locator, Page } from "playwright";
-import type { AuthState, SessionContext } from "./types.js";
-import { config } from "./config.js";
-import { selectors, cssSelectors } from "./selectors.js";
-import { AuthError } from "./recovery.js";
-import { matchKnownRoute, extractRouteParams, type SearchRoot } from "./navigation.js";
-import { readRouteSnapshotDiagnostic, readPageSectionsDiagnostic, discoverLinksDiagnostic } from "./diagnostics.js";
-import { knownRoutes, knownActions, actionById, type KnownActionId, type KnownRouteId } from "./catalog.js";
+import type { AuthState, SessionContext } from "../../core/types.js";
+import { config } from "../../core/config.js";
+import { selectors, cssSelectors } from "../../platform/selectors.js";
+import { AuthError } from "../../core/recovery.js";
+import { matchKnownRoute, extractRouteParams, type SearchRoot } from "../../platform/navigation.js";
+import { readRouteSnapshotDiagnostic, readPageSectionsDiagnostic, discoverLinksDiagnostic } from "../../platform/diagnostics.js";
+import { knownRoutes, knownActions, actionById, type KnownActionId, type KnownRouteId } from "../../platform/catalog.js";
+import { splitVisibleLines } from "../../platform/extractors.js";
+import { extractAssessmentQuestionState, extractLevelCheck, extractUnderstandOverview } from "../../platform/extractors.js";
 
 export type AuthWorkflowDeps = {
   ensurePage: () => Page;
@@ -206,6 +208,20 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
 
       const generic = page.locator('[class*="message"], [data-role*="message"], [data-testid*="message"]');
       if ((await generic.count()) === 0) {
+        const bodyText = await page.locator("body").innerText().catch(() => "");
+        const lines = splitVisibleLines(bodyText);
+        const idx = lines.findIndex((line) => /Type your message/i.test(line));
+        if (idx > 0) {
+          return lines
+            .slice(Math.max(0, idx - 16), idx)
+            .filter(
+              (line) =>
+                line.length > 6 &&
+                !/SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|Help|More|WHAT DO YOU DESIRE TODAY\?|SELF-MAX GUIDE|GOAL CATEGORIES|YOUR GOALS|SHOW GOALS:|NEW GOAL|LIFESTORMING|Health|Work|Love|Family|Social|Fun|Dreams|Meaning|Active|Complete|Archived|All/i.test(
+                  line
+                )
+            );
+        }
         return [];
       }
 
@@ -248,6 +264,8 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       const page = deps.pageOrThrow();
       if (explicitUrl) {
         await page.goto(assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" });
+      } else if (route && route in knownRoutes) {
+        await this.navigate(route as KnownRouteId);
       } else if (route) {
         const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
         const path = route.startsWith("/") ? route : `/${route}`;
@@ -267,6 +285,50 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       const page = deps.pageOrThrow();
       await navigateForRead(route, explicitUrl);
       return discoverLinksDiagnostic(page);
+    },
+
+    async readUnderstandOverview() {
+      const page = deps.pageOrThrow();
+      await this.navigate("understand");
+      const text = await page.locator("body").innerText().catch(() => "");
+      const links = await page.evaluate(() =>
+        Array.from(document.querySelectorAll("a[href]"))
+          .map((el) => ({
+            text: ((el.textContent || "").replace(/\s+/g, " ").trim()),
+            href: (el as HTMLAnchorElement).href || ""
+          }))
+          .filter((item) => item.text)
+      );
+      return { url: page.url(), routeId: "understand", ...extractUnderstandOverview(text, links) };
+    },
+
+    async readLevelCheck() {
+      const page = deps.pageOrThrow();
+      await page.goto(knownRoutes.level_check, { waitUntil: "domcontentloaded" });
+      const text = await page.locator("body").innerText().catch(() => "");
+      return { url: page.url(), routeId: "level_check", ...extractLevelCheck(text) };
+    },
+
+    async readLifeHistoryAssessment() {
+      const page = deps.pageOrThrow();
+      await page.goto(knownRoutes.assessment_life_history, { waitUntil: "domcontentloaded" });
+      const text = await page.locator("body").innerText().catch(() => "");
+      return { url: page.url(), routeId: "assessment_life_history", ...extractAssessmentQuestionState(text) };
+    },
+
+    async readBigFiveAssessment() {
+      const page = deps.pageOrThrow();
+      await page.goto(knownRoutes.assessment_big_five, { waitUntil: "domcontentloaded" });
+      const deadline = Date.now() + 4000;
+      while (Date.now() < deadline) {
+        const text = await page.locator("body").innerText().catch(() => "");
+        if (!/Loading Test Information/i.test(text)) {
+          return { url: page.url(), routeId: "assessment_big_five", ...extractAssessmentQuestionState(text) };
+        }
+        await page.waitForTimeout(250);
+      }
+      const text = await page.locator("body").innerText().catch(() => "");
+      return { url: page.url(), routeId: "assessment_big_five", ...extractAssessmentQuestionState(text) };
     },
 
     async navigate(route: KnownRouteId): Promise<{ route: KnownRouteId; url: string }> {

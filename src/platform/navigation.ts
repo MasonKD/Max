@@ -1,6 +1,6 @@
 import type { Locator, Page } from "playwright";
 import { knownRoutes, type KnownRouteId } from "./catalog.js";
-import { SelectorError, TimeoutError } from "./recovery.js";
+import { SelectorError, TimeoutError } from "../core/recovery.js";
 
 export type SearchRoot = Page | Locator;
 

@@ -4,58 +4,28 @@ This project provides a Playwright-driven integration layer so OpenClaw/Moltbot 
 
 ## What it provides
 
-- API-like primitives executed against the SelfMax web app:
-  - `login`
+- Public API endpoints exposed over WebSocket `type: "api"`:
   - `get_state`
-  - `set_state`
+  - `get_goals`
+  - `get_goal`
+  - `get_goal_tasks`
+  - `get_goal_chat`
+  - `get_desires`
+  - `get_desire`
+  - `get_actions`
   - `talk_to_guide`
   - `talk_to_goal_chat`
-  - `send_coach_message` (legacy alias)
-  - `read_coach_messages`
-  - `brainstorm_desires_for_each_category`
-  - `feel_out_desires`
+  - `add_desires`
+  - `update_desires`
   - `create_goals_from_desires`
   - `create_goal`
-  - `read_auth_state`
-  - `read_current_route`
-  - `read_known_routes`
-  - `read_goals_overview`
-  - `read_route_snapshot`
-  - `read_page_sections`
-  - `discover_links`
-  - `list_goals`
-  - `discover_goals`
-  - `discover_goal_ids`
-  - `read_goal`
-  - `read_goal_metadata`
-  - `read_goal_workspace`
-  - `read_goal_full`
-  - `read_cached_goals`
-  - `read_cached_desires`
-  - `read_task_panel_snapshot`
-  - `survey_active_goal_task_states`
-  - `list_goal_tasks`
-  - `read_goal_chat`
-  - `read_lifestorming_overview`
-  - `list_lifestorming_desires`
-  - `read_lifestorming_category`
-  - `read_lifestorming_full`
-  - `read_sensation_practice`
-  - `start_goal`
-  - `add_tasks`
-  - `remove_task`
-  - `complete_task`
-  - `uncomplete_task`
-  - `complete_goal`
-  - `archive_goal`
-  - `delete_goal`
-  - `delete_goal_api` (best-effort; requires exposed Firebase SDK in page context)
-  - `navigate`
-  - `list_known_actions`
-  - `invoke_known_action`
+  - `update_goal`
+  - `update_tasks`
 - Atomic primitive execution (serialized task queue).
 - Session-scoped message bridge for OpenClaw, SelfMax bot, and end-user over WebSocket.
 - State persistence in SelfMax browser storage (keyed by user/session).
+
+Internal Playwright primitives still exist for local smoke/dev tooling, but they are private implementation details and are not part of the external contract.
 
 ## Run
 
@@ -118,9 +88,28 @@ node scripts/selfmax-smoke.mjs list-desires
 node scripts/selfmax-smoke.mjs read-desire-category --message Health
 node scripts/selfmax-smoke.mjs read-lifestorming-full
 node scripts/selfmax-smoke.mjs read-sensation-practice --desire-id <desire-id>
+node scripts/selfmax-smoke.mjs update-goal-due-date --goal-title "go rock climbing" --due-date 2026-03-15
 ```
 
-`smoke:keep-open` logs in once and keeps the browser open for repeated rounds:
+Goal creation requires explicit inputs:
+- `create_goal` requires `title`, `category`, and `dueDate`
+- `create_goals_from_desires` requires each entry to include a due date
+- for `create_goals_from_desires`, the desire is indexed by `title`
+- resulting goal title defaults to `title`, with optional `goalTitle` override
+- resulting goal category defaults to cached desire category, with optional `goalCategory` override
+- optional overrides are supported with `goalTitle` and `goalCategory`
+- the API layer should not assume a default category or due date
+
+Goal updates:
+- public goal mutation should use `update_goal`
+- `update_goal` requires `goalTitle` and at least one of:
+  - `status`: `active` | `completed` | `archived`
+  - `dueDate`: `YYYY-MM-DD`
+- primary due-date path: `/goals` inline due-date editor from the visible `Due ...` label
+- fallback due-date path: backend write with postcondition verification
+- legacy goal-specific mutation primitives still exist internally, but `update_goal` is the preferred public contract
+
+`smoke:keep-open` logs in once and keeps the browser open for repeated rounds. This is internal development tooling, not the external API:
 
 ```text
 sequence
@@ -140,17 +129,17 @@ Connect with query params:
 - `userId`: user identifier
 - `sessionId`: session identifier
 
-Primitive request example:
+API request example:
 
 ```json
 {
-  "type": "primitive",
+  "type": "api",
   "role": "openclaw",
   "correlationId": "req-1",
   "payload": {
     "id": "req-1",
-    "name": "set_state",
-    "payload": { "goal": "Run 5k", "status": "active" }
+    "name": "get_actions",
+    "payload": {}
   }
 }
 ```
@@ -166,56 +155,53 @@ Chat passthrough example:
 }
 ```
 
-Known action invocation example:
+Add desires example:
 
 ```json
 {
-  "type": "primitive",
+  "type": "api",
   "role": "openclaw",
   "correlationId": "req-2",
   "payload": {
     "id": "req-2",
-    "name": "invoke_known_action",
-    "payload": {
-      "actionId": "goals.send_guide_message",
-      "message": "Help me prioritize today's top goal."
-    }
-  }
-}
-```
-
-MVP primitive examples:
-
-```json
-{
-  "type": "primitive",
-  "role": "openclaw",
-  "correlationId": "req-login",
-  "payload": { "id": "req-login", "name": "login" }
-}
-```
-
-```json
-{
-  "type": "primitive",
-  "role": "openclaw",
-  "correlationId": "req-brainstorm",
-  "payload": {
-    "id": "req-brainstorm",
-    "name": "brainstorm_desires_for_each_category",
+    "name": "add_desires",
     "payload": {
       "itemsByCategory": {
-        "health": ["Get healthy", "Sleep better"],
-        "work": ["Ship one meaningful project this quarter"]
+        "Health": ["Get healthy", "Sleep better"],
+        "Work": ["Ship one meaningful project this quarter"]
       }
     }
   }
 }
 ```
 
+Update desires example:
+
 ```json
 {
-  "type": "primitive",
+  "type": "api",
+  "role": "openclaw",
+  "correlationId": "req-update-desires",
+  "payload": {
+    "id": "req-update-desires",
+    "name": "update_desires",
+    "payload": {
+      "desires": [
+        {
+          "title": "Learn to love",
+          "notes": "Feels meaningful, vulnerable, and worth exploring."
+        }
+      ]
+    }
+  }
+}
+```
+
+Goal chat example:
+
+```json
+{
+  "type": "api",
   "role": "openclaw",
   "correlationId": "req-goal-chat",
   "payload": {
@@ -229,17 +215,42 @@ MVP primitive examples:
 }
 ```
 
-Goal lifecycle primitives accept `goalId` for deterministic targeting of existing goals:
+Update goal example:
 
 ```json
 {
-  "type": "primitive",
+  "type": "api",
   "role": "openclaw",
-  "correlationId": "req-start-id",
+  "correlationId": "req-update-goal",
   "payload": {
-    "id": "req-start-id",
-    "name": "start_goal",
-    "payload": { "goalId": "9JOUKBmhwNj11uj8IUTf" }
+    "id": "req-update-goal",
+    "name": "update_goal",
+    "payload": {
+      "goalTitle": "start a family",
+      "status": "archived",
+      "dueDate": "2026-03-15"
+    }
+  }
+}
+```
+
+Update tasks example:
+
+```json
+{
+  "type": "api",
+  "role": "openclaw",
+  "correlationId": "req-update-tasks",
+  "payload": {
+    "id": "req-update-tasks",
+    "name": "update_tasks",
+    "payload": {
+      "goalTitle": "start a family",
+      "updates": [
+        { "task": "Call the specialist", "action": "add" },
+        { "task": "Review insurance options", "action": "complete" }
+      ]
+    }
   }
 }
 ```
@@ -249,6 +260,8 @@ Goal lifecycle primitives accept `goalId` for deterministic targeting of existin
 - SelfMax selectors are configurable via env vars because the DOM may change.
 - Current state persistence is implemented with `window.localStorage` inside the authenticated SelfMax session context.
 - For production durability, replace storage primitives with explicit SelfMax UI actions that write/read from a durable in-app entity (notes/journal/custom field).
+- The external contract is the public API carried in WebSocket envelopes with `type: "api"`.
+- Internal primitives, diagnostics, navigation helpers, and operational controls are private implementation details.
 - Canonical route/state/action definitions are documented in `docs/selfmax-route-state-action-spec.md`.
 - Canonical guidance language inventory is documented in `docs/selfmax-guidance-copy-inventory.md`.
 - Canonical integration runtime flow is documented in `docs/selfmax-technical-integration-flow.md`.

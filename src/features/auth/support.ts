@@ -1,11 +1,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { BrowserContext, Locator, Page } from "playwright";
-import { config } from "./config.js";
-import { textSelectors, selectors } from "./selectors.js";
-import { AuthError } from "./recovery.js";
-import { resolveFirstVisible } from "./navigation.js";
-import type { SessionContext } from "./types.js";
+import { config } from "../../core/config.js";
+import { textSelectors, selectors } from "../../platform/selectors.js";
+import { AuthError } from "../../core/recovery.js";
+import { resolveFirstVisible } from "../../platform/navigation.js";
+import type { SessionContext } from "../../core/types.js";
 
 export type AuthSupportDeps = {
   pageOrThrow: () => Page;
@@ -16,25 +16,27 @@ export function createAuthSupport(deps: AuthSupportDeps) {
   return {
     async resolveChatInput(): Promise<Locator> {
       const page = deps.pageOrThrow();
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const byPlaceholder = page.getByPlaceholder("Type your message...").first();
+        if ((await byPlaceholder.count()) > 0) return byPlaceholder;
 
-      const byPlaceholder = page.getByPlaceholder("Type your message...").first();
-      if ((await byPlaceholder.count()) > 0) return byPlaceholder;
+        const byTextboxRoleNamed = page.getByRole("textbox", { name: /message|guide|chat/i }).first();
+        if ((await byTextboxRoleNamed.count()) > 0) return byTextboxRoleNamed;
 
-      const byTextboxRoleNamed = page.getByRole("textbox", { name: /message|guide|chat/i }).first();
-      if ((await byTextboxRoleNamed.count()) > 0) return byTextboxRoleNamed;
+        const byAnyTextboxRole = page.getByRole("textbox").first();
+        if ((await byAnyTextboxRole.count()) > 0) return byAnyTextboxRole;
 
-      const byAnyTextboxRole = page.getByRole("textbox").first();
-      if ((await byAnyTextboxRole.count()) > 0) return byAnyTextboxRole;
+        const byConfiguredSelector = page.locator(config.COACH_INPUT_SELECTOR).first();
+        if ((await byConfiguredSelector.count()) > 0) return byConfiguredSelector;
 
-      const byConfiguredSelector = page.locator(config.COACH_INPUT_SELECTOR).first();
-      if ((await byConfiguredSelector.count()) > 0) return byConfiguredSelector;
+        const byContentEditable = page.locator('[contenteditable="true"]').first();
+        if ((await byContentEditable.count()) > 0) return byContentEditable;
 
-      const byContentEditable = page.locator('[contenteditable="true"]').first();
-      if ((await byContentEditable.count()) > 0) return byContentEditable;
-
-      const generic = page.locator("textarea, input[type='text'], input:not([type])").first();
-      if ((await generic.count()) > 0) return generic;
-
+        const generic = page.locator("textarea, input[type='text'], input:not([type])").first();
+        if ((await generic.count()) > 0) return generic;
+        await page.waitForTimeout(250);
+      }
       throw new Error("could not locate chat input");
     },
 

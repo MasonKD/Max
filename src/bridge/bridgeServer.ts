@@ -1,12 +1,13 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
-import { config } from "./config.js";
-import { SelfMaxPlaywrightClient } from "./selfmaxClient.js";
-import type { BridgeEnvelope, BusRole, SessionContext } from "./types.js";
-import { busRoles } from "./types.js";
-import { incomingBridgeEnvelopeSchema } from "./schemas.js";
-import type { IncomingBridgeEnvelope } from "./schemas.js";
+import { config } from "../core/config.js";
+import { SelfMaxPlaywrightClient } from "../client/selfmaxClient.js";
+import type { BridgeEnvelope, BusRole, SessionContext } from "../core/types.js";
+import { busRoles } from "../core/types.js";
+import { incomingBridgeEnvelopeSchema } from "../core/schemas.js";
+import type { IncomingBridgeEnvelope } from "../core/schemas.js";
 import { ZodError } from "zod";
+import { PublicApi } from "../api/publicApi.js";
 
 type ClientCtx = {
   socket: WebSocket;
@@ -17,6 +18,7 @@ type ClientCtx = {
 export class BridgeServer {
   private readonly wss = new WebSocketServer({ port: config.PORT });
   private readonly selfmax = new SelfMaxPlaywrightClient();
+  private readonly publicApi = new PublicApi(this.selfmax);
   private readonly clients = new Set<ClientCtx>();
 
   async start(): Promise<void> {
@@ -68,11 +70,28 @@ export class BridgeServer {
   }
 
   private async route(sender: ClientCtx, envelope: IncomingBridgeEnvelope): Promise<void> {
-    if (envelope.type === "primitive") {
-      const res = await this.selfmax.execute(envelope.payload, sender.session);
+    if (envelope.type === "api") {
+      const res = await this.publicApi.execute(envelope.payload, sender.session);
       sender.socket.send(
         JSON.stringify({
           type: res.ok ? "ack" : "error",
+          role: "selfmax-bot",
+          correlationId: envelope.correlationId,
+          payload: res
+        } satisfies BridgeEnvelope)
+      );
+      return;
+    }
+
+    if (envelope.type === "primitive") {
+      const res = {
+        id: envelope.payload.id,
+        ok: false,
+        error: "primitive endpoints are private; use public api endpoints"
+      };
+      sender.socket.send(
+        JSON.stringify({
+          type: "error",
           role: "selfmax-bot",
           correlationId: envelope.correlationId,
           payload: res

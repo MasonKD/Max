@@ -1,5 +1,5 @@
-import { extractGoalStatusBlocks, extractGoalTitleFromWorkspace, splitVisibleLines, normalizeWhitespace } from "./extractors.js";
-import type { GoalStatusBlock } from "./types.js";
+import { extractGoalStatusBlocks, extractGoalTitleFromWorkspace, splitVisibleLines, normalizeWhitespace } from "../../platform/extractors.js";
+import type { GoalStatusBlock } from "../../core/types.js";
 
 export type GoalWorkspaceSnapshot = {
   goalTitle?: string;
