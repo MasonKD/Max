@@ -3,10 +3,33 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { config } from "./config.js";
 import { AtomicExecutor } from "./atomic.js";
-import type { PrimitiveRequest, PrimitiveResponse, SessionContext } from "./types.js";
+import type {
+  AuthState,
+  GoalStatusBlock,
+  GoalSummary,
+  PrimitiveName,
+  PrimitiveRequest,
+  PrimitiveResponse,
+  SessionContext,
+  TaskItem
+} from "./types.js";
 import { actionById, knownActions, knownRoutes, type KnownActionId, type KnownRouteId } from "./catalog.js";
-
-type SearchRoot = Page | Locator;
+import { createReadPrimitiveHandlers } from "./primitives-read.js";
+import { createWritePrimitiveHandlers } from "./primitives-write.js";
+import { readPageSectionsDiagnostic, readRouteSnapshotDiagnostic, discoverLinksDiagnostic, readTaskPanelSnapshotDiagnostic, readBodySnippet } from "./diagnostics.js";
+import { clickByText, extractRouteParams, goalIdFromUrl, matchKnownRoute, normalizeDateInput, resolveFirstVisible, titleCase, tryClickByCss, tryClickByText, waitForCondition, type SearchRoot } from "./navigation.js";
+import { selectors, cssSelectors, textSelectors } from "./selectors.js";
+import { AuthError, formatError, SelectorError, StateError } from "./recovery.js";
+import {
+  dedupeGoalSummaries,
+  extractGoalStatusBlocks,
+  extractGoalSummariesFromText,
+  extractGoalTitleFromWorkspace,
+  extractGoalsOverview,
+  extractLifestormingCategory,
+  extractLifestormingOverview,
+  extractSensationPractice
+} from "./extractors.js";
 
 type DesireInput = {
   title: string;
@@ -46,6 +69,60 @@ export class SelfMaxPlaywrightClient {
   private page?: Page;
   private readonly atomic = new AtomicExecutor();
   private readonly entityCache: SessionEntityCache = { goalsById: {}, desiresById: {} };
+  private readonly handlers = {
+    ...createReadPrimitiveHandlers({
+      login: () => this.login(),
+      getState: (session) => this.getState(session),
+      readAuthState: () => this.readAuthState(),
+      readCurrentRoute: () => this.readCurrentRoute(),
+      readKnownRoutes: () => this.readKnownRoutes(),
+      readGoalsOverview: () => this.readGoalsOverview(),
+      readRouteSnapshot: (route, url) => this.readRouteSnapshot(route, url),
+      readPageSections: (route, url) => this.readPageSections(route, url),
+      discoverLinks: (route, url) => this.discoverLinks(route, url),
+      listGoals: (filter) => this.listGoals(filter),
+      discoverGoals: (waitMs) => this.discoverGoals(waitMs),
+      discoverGoalIds: (waitMs) => this.discoverGoalIds(waitMs),
+      readGoal: (goalTitle, goalId) => this.readGoal(goalTitle, goalId),
+      readGoalMetadata: (goalTitle, goalId) => this.readGoalMetadata(goalTitle, goalId),
+      readGoalWorkspace: (goalTitle, goalId) => this.readGoalWorkspace(goalTitle, goalId),
+      readGoalFull: (goalTitle, goalId) => this.readGoalFull(goalTitle, goalId),
+      readCachedGoals: () => this.readCachedGoals(),
+      readCachedDesires: () => this.readCachedDesires(),
+      readTaskPanelSnapshot: (goalTitle, goalId) => this.readTaskPanelSnapshot(goalTitle, goalId),
+      surveyActiveGoalTaskStates: () => this.surveyActiveGoalTaskStates(),
+      listGoalTasks: (goalTitle, goalId) => this.listGoalTasks(goalTitle, goalId),
+      readGoalChat: (goalTitle, goalId) => this.readGoalChat(goalTitle, goalId),
+      readLifestormingOverview: () => this.readLifestormingOverview(),
+      listLifestormingDesires: () => this.listLifestormingDesires(),
+      readLifestormingCategory: (category) => this.readLifestormingCategory(category),
+      readLifestormingFull: () => this.readLifestormingFull(),
+      readSensationPractice: (desireId, desireTitle) => this.readSensationPractice(desireId, desireTitle),
+      readCoachMessages: () => this.readCoachMessages(),
+      listKnownActions: (route) => this.listKnownActions(route as KnownRouteId | null)
+    }),
+    ...createWritePrimitiveHandlers({
+      setState: (session, patch) => this.setState(session, patch),
+      talkToGuide: (message) => this.talkToGuide(message),
+      talkToGoalChat: (message, goalTitle) => this.talkToGoalChat(message, goalTitle),
+      sendCoachMessage: (message) => this.sendCoachMessage(message),
+      brainstormDesiresForEachCategory: (items) => this.brainstormDesiresForEachCategory(items),
+      feelOutDesires: (desires) => this.feelOutDesires(desires),
+      createGoalsFromDesires: (desires) => this.createGoalsFromDesires(desires),
+      createGoal: (input) => this.createGoal(input),
+      startGoal: (goalTitle, goalId) => this.startGoal(goalTitle, goalId),
+      addTasks: (goalTitle, goalId, tasks, useSuggestions) => this.addTasks(goalTitle, goalId, tasks, useSuggestions),
+      removeTask: (goalTitle, goalId, taskText) => this.removeTask(goalTitle, goalId, taskText),
+      completeTask: (goalTitle, goalId, taskText) => this.completeTask(goalTitle, goalId, taskText),
+      uncompleteTask: (goalTitle, goalId, taskText) => this.uncompleteTask(goalTitle, goalId, taskText),
+      completeGoal: (goalTitle, goalId) => this.completeGoal(goalTitle, goalId),
+      archiveGoal: (goalTitle, goalId) => this.archiveGoal(goalTitle, goalId),
+      deleteGoal: (goalTitle, goalId) => this.deleteGoal(goalTitle, goalId),
+      deleteGoalApi: (goalId) => this.deleteGoalApi(goalId),
+      navigate: (route) => this.navigate(route),
+      invokeKnownAction: (payload) => this.invokeKnownAction(payload)
+    })
+  } satisfies Partial<Record<PrimitiveName, (req: PrimitiveRequest, session: SessionContext) => Promise<unknown>>>;
 
   async init(): Promise<void> {
     this.browser = await chromium.launch({ headless: config.HEADLESS });
@@ -64,130 +141,11 @@ export class SelfMaxPlaywrightClient {
   async execute(req: PrimitiveRequest, session: SessionContext): Promise<PrimitiveResponse> {
     try {
       const result = await this.atomic.run(async () => {
-        switch (req.name) {
-          case "login":
-            return this.login();
-          case "set_state":
-            return this.setState(session, req.payload ?? {});
-          case "get_state":
-            return this.getState(session);
-          case "talk_to_guide":
-            return this.talkToGuide(String(req.payload?.message ?? ""));
-          case "talk_to_goal_chat":
-            return this.talkToGoalChat(String(req.payload?.message ?? ""), this.asOptionalString(req.payload?.goalTitle));
-          case "send_coach_message":
-            return this.sendCoachMessage(String(req.payload?.message ?? ""));
-          case "read_coach_messages":
-            return this.readCoachMessages();
-          case "brainstorm_desires_for_each_category":
-            return this.brainstormDesiresForEachCategory((req.payload?.itemsByCategory as Record<string, unknown>) ?? {});
-          case "feel_out_desires":
-            return this.feelOutDesires((req.payload?.desires as unknown[]) ?? []);
-          case "create_goals_from_desires":
-            return this.createGoalsFromDesires((req.payload?.desires as unknown[]) ?? []);
-          case "create_goal":
-            return this.createGoal({
-              title: String(req.payload?.title ?? ""),
-              category: this.asOptionalString(req.payload?.category),
-              dueDate: this.asOptionalString(req.payload?.dueDate)
-            });
-          case "read_auth_state":
-            return this.readAuthState();
-          case "read_current_route":
-            return this.readCurrentRoute();
-          case "read_known_routes":
-            return this.readKnownRoutes();
-          case "read_goals_overview":
-            return this.readGoalsOverview();
-          case "read_route_snapshot":
-            return this.readRouteSnapshot(
-              this.asOptionalString(req.payload?.route),
-              this.asOptionalString(req.payload?.url)
-            );
-          case "read_page_sections":
-            return this.readPageSections(this.asOptionalString(req.payload?.route), this.asOptionalString(req.payload?.url));
-          case "discover_links":
-            return this.discoverLinks(this.asOptionalString(req.payload?.route), this.asOptionalString(req.payload?.url));
-          case "list_goals":
-            return this.listGoals((req.payload?.filter as string | undefined) ?? "all");
-          case "discover_goals":
-            return this.discoverGoals(req.payload?.waitMs);
-          case "discover_goal_ids":
-            return this.discoverGoalIds(req.payload?.waitMs);
-          case "read_goal":
-            return this.readGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_goal_metadata":
-            return this.readGoalMetadata(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_goal_workspace":
-            return this.readGoalWorkspace(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_goal_full":
-            return this.readGoalFull(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_cached_goals":
-            return this.readCachedGoals();
-          case "read_cached_desires":
-            return this.readCachedDesires();
-          case "read_task_panel_snapshot":
-            return this.readTaskPanelSnapshot(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "survey_active_goal_task_states":
-            return this.surveyActiveGoalTaskStates();
-          case "list_goal_tasks":
-            return this.listGoalTasks(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_goal_chat":
-            return this.readGoalChat(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "read_lifestorming_overview":
-            return this.readLifestormingOverview();
-          case "list_lifestorming_desires":
-            return this.listLifestormingDesires();
-          case "read_lifestorming_category":
-            return this.readLifestormingCategory(this.asOptionalString(req.payload?.category));
-          case "read_lifestorming_full":
-            return this.readLifestormingFull();
-          case "read_sensation_practice":
-            return this.readSensationPractice(this.asOptionalString(req.payload?.desireId), this.asOptionalString(req.payload?.desireTitle));
-          case "start_goal":
-            return this.startGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "add_tasks":
-            return this.addTasks(
-              this.asOptionalString(req.payload?.goalTitle),
-              this.asOptionalString(req.payload?.goalId),
-              ((req.payload?.tasks as unknown[]) ?? []).map((v) => String(v)),
-              Boolean(req.payload?.useSuggestions)
-            );
-          case "remove_task":
-            return this.removeTask(
-              this.asOptionalString(req.payload?.goalTitle),
-              this.asOptionalString(req.payload?.goalId),
-              String(req.payload?.taskText ?? "")
-            );
-          case "complete_task":
-            return this.completeTask(
-              this.asOptionalString(req.payload?.goalTitle),
-              this.asOptionalString(req.payload?.goalId),
-              String(req.payload?.taskText ?? "")
-            );
-          case "uncomplete_task":
-            return this.uncompleteTask(
-              this.asOptionalString(req.payload?.goalTitle),
-              this.asOptionalString(req.payload?.goalId),
-              String(req.payload?.taskText ?? "")
-            );
-          case "complete_goal":
-            return this.completeGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "archive_goal":
-            return this.archiveGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "delete_goal":
-            return this.deleteGoal(this.asOptionalString(req.payload?.goalTitle), this.asOptionalString(req.payload?.goalId));
-          case "delete_goal_api":
-            return this.deleteGoalApi(this.asOptionalString(req.payload?.goalId));
-          case "navigate":
-            return this.navigate((req.payload?.route as KnownRouteId | undefined) ?? "goals");
-          case "list_known_actions":
-            return this.listKnownActions((req.payload?.route as KnownRouteId | undefined) ?? null);
-          case "invoke_known_action":
-            return this.invokeKnownAction(req.payload ?? {});
-          default:
-            return this.assertUnreachable(req.name);
+        const handler = this.handlers[req.name];
+        if (!handler) {
+          throw new Error(`unsupported primitive: ${String(req.name)}`);
         }
+        return handler(req, session);
       });
 
       return {
@@ -199,7 +157,7 @@ export class SelfMaxPlaywrightClient {
       return {
         id: req.id,
         ok: false,
-        error: error instanceof Error ? error.message : "unknown error"
+        error: formatError(error)
       };
     }
   }
@@ -241,15 +199,13 @@ export class SelfMaxPlaywrightClient {
 
         const emailInput = await this.resolveFirstVisible(page, [
           config.LOGIN_EMAIL_SELECTOR,
-          'input[type=\"email\"]',
-          'input[name*=\"email\" i]'
+          ...cssSelectors(selectors.auth.emailInput)
         ]);
         await emailInput.fill(config.SELFMAX_EMAIL);
 
         const passwordInput = await this.resolveFirstVisible(page, [
           config.LOGIN_PASSWORD_SELECTOR,
-          'input[type=\"password\"]',
-          'input[name*=\"password\" i]'
+          ...cssSelectors(selectors.auth.passwordInput)
         ]);
         await passwordInput.fill(config.SELFMAX_PASSWORD);
 
@@ -260,10 +216,13 @@ export class SelfMaxPlaywrightClient {
           submitted = true;
         }
         if (!submitted) {
-          submitted = await this.tryClickByCss(page, [config.LOGIN_SUBMIT_SELECTOR, 'button[type=\"submit\"]']);
+          submitted = await this.tryClickByCss(page, [config.LOGIN_SUBMIT_SELECTOR, ...cssSelectors(selectors.auth.submitButtons)]);
         }
         if (!submitted) {
-          throw new Error("could not submit login form");
+          throw new AuthError("could not submit login form", {
+            action: "inspect auth selectors",
+            detail: "submit button did not match primary or fallback selectors"
+          });
         }
 
         await Promise.race([
@@ -305,7 +264,10 @@ export class SelfMaxPlaywrightClient {
       await page.waitForTimeout(1500);
     }
 
-    throw lastError ?? new Error("login failed after retries");
+    throw lastError ?? new AuthError("login failed after retries", {
+      action: "re-authenticate in a long-lived session",
+      detail: "storage state did not restore a valid goals workspace"
+    });
   }
 
   private async setState(session: SessionContext, patch: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -591,7 +553,7 @@ export class SelfMaxPlaywrightClient {
 
   private async readGoalsOverview(): Promise<{
     url: string;
-    auth: { valid: boolean; archivedCount: number | null; activeCount: number | null; completeCount: number | null; allCount: number | null };
+    auth: AuthState;
     guidePrompt?: string;
     filterCounts: Record<string, number>;
     categoryCounts: Array<{ category: string; count: number }>;
@@ -602,56 +564,13 @@ export class SelfMaxPlaywrightClient {
     await this.ensureOnGoals();
     const auth = await this.readAuthState();
 
-    const result = await page.evaluate(() => {
-      const text = document.body.innerText || "";
-      const lines = text.split(/\n+/).map((v) => v.trim()).filter(Boolean);
-
-      const filterCounts: Record<string, number> = {};
-      for (const match of text.matchAll(/\b(Active|Complete|Archived|All)\s*\((\d+)\)/gi)) {
-        filterCounts[match[1].toLowerCase()] = Number(match[2]);
-      }
-
-      const categoryCounts: Array<{ category: string; count: number }> = [];
-      const categories = ["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"];
-      for (let i = 0; i < lines.length; i += 1) {
-        const line = lines[i];
-        const category = categories.find((name) => line.toLowerCase() === name.toLowerCase());
-        if (!category) continue;
-        const prev = lines[i - 1] ?? "";
-        const count = Number(prev);
-        if (!Number.isNaN(count)) {
-          categoryCounts.push({ category, count });
-        }
-      }
-
-      const guidePrompt = lines.find((line) => /Don't know where to start|guide you towards one of your goals/i.test(line));
-      const visibleGoals = lines.filter(
-        (line) =>
-          line.length > 2 &&
-          !/SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|GOAL CATEGORIES|YOUR GOALS|SHOW GOALS|NEW GOAL|LIFESTORMING|SELF-MAX GUIDE|DON'T KNOW WHERE TO START|HELP|MORE|Health|Work|Love|Family|Social|Fun|Dreams|Meaning|Active|Complete|Archived|All/i.test(
-            line
-          )
-      ).slice(0, 20);
-
-      return {
-        guidePrompt,
-        filterCounts,
-        categoryCounts,
-        visibleGoals,
-        snippet: text.replace(/\s+/g, " ").slice(0, 800)
-      };
-    });
+    const text = await page.locator("body").innerText().catch(() => "");
+    const result = extractGoalsOverview(text);
 
     return { url: page.url(), auth, ...result };
   }
 
-  private async readAuthState(): Promise<{
-    valid: boolean;
-    archivedCount: number | null;
-    activeCount: number | null;
-    completeCount: number | null;
-    allCount: number | null;
-  }> {
+  private async readAuthState(): Promise<AuthState> {
     const archivedCount = await this.readGoalCount("Archived");
     const activeCount = await this.readGoalCount("Active");
     const completeCount = await this.readGoalCount("Complete");
@@ -674,8 +593,8 @@ export class SelfMaxPlaywrightClient {
     const url = page.url();
     return {
       url,
-      routeId: this.matchKnownRoute(url),
-      params: this.extractRouteParams(url)
+      routeId: matchKnownRoute(url),
+      params: extractRouteParams(url)
     };
   }
 
@@ -688,7 +607,7 @@ export class SelfMaxPlaywrightClient {
     explicitUrl?: string
   ): Promise<{
     url: string;
-    auth?: { valid: boolean; archivedCount: number | null; activeCount: number | null; completeCount: number | null; allCount: number | null };
+    auth?: AuthState;
     headingCandidates: string[];
     buttonTexts: string[];
     inputPlaceholders: string[];
@@ -702,30 +621,8 @@ export class SelfMaxPlaywrightClient {
       const path = route.startsWith("/") ? route : `/${route}`;
       await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
     }
-
-    const result = await page.evaluate(() => {
-      const headings = Array.from(document.querySelectorAll("h1,h2,h3,[role='heading']"))
-        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-        .filter(Boolean)
-        .slice(0, 20);
-      const buttonTexts = Array.from(document.querySelectorAll("button,[role='button'],a"))
-        .map((el) => (el.textContent || "").replace(/\s+/g, " ").trim())
-        .filter(Boolean)
-        .slice(0, 30);
-      const inputPlaceholders = Array.from(document.querySelectorAll("input,textarea"))
-        .map((el) => ("placeholder" in el ? String(el.placeholder || "").trim() : ""))
-        .filter(Boolean)
-        .slice(0, 20);
-      return {
-        headingCandidates: headings,
-        buttonTexts,
-        inputPlaceholders,
-        snippet: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 900)
-      };
-    });
-
     const onGoals = /\/goals(\?|$)/.test(page.url());
-    return { url: page.url(), auth: onGoals ? await this.readAuthState() : undefined, ...result };
+    return readRouteSnapshotDiagnostic(page, onGoals ? await this.readAuthState() : undefined);
   }
 
   private async readPageSections(
@@ -744,54 +641,7 @@ export class SelfMaxPlaywrightClient {
   }> {
     const page = this.pageOrThrow();
     await this.navigateForRead(route, explicitUrl);
-
-    const result = await page.evaluate(() => {
-      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
-      const headings = Array.from(document.querySelectorAll("h1,h2,h3,[role='heading']"))
-        .map((el) => normalize(el.textContent || ""))
-        .filter(Boolean)
-        .slice(0, 30);
-      const paragraphs = Array.from(document.querySelectorAll("p, li"))
-        .map((el) => normalize(el.textContent || ""))
-        .filter((text) => text.length >= 20)
-        .slice(0, 40);
-      const formLabels = Array.from(document.querySelectorAll("label, legend"))
-        .map((el) => normalize(el.textContent || ""))
-        .filter(Boolean)
-        .slice(0, 30);
-      const buttons = Array.from(document.querySelectorAll("button, [role='button']"))
-        .map((el) => normalize(el.textContent || ""))
-        .filter(Boolean)
-        .slice(0, 30);
-      const links = Array.from(document.querySelectorAll("a[href]"))
-        .map((el) => ({
-          text: normalize(el.textContent || ""),
-          href: (el as HTMLAnchorElement).href || ""
-        }))
-        .filter((item) => item.href)
-        .slice(0, 40);
-      return {
-        title: document.title || "",
-        headings,
-        paragraphs,
-        formLabels,
-        buttons,
-        links,
-        snippet: normalize(document.body.innerText || "").slice(0, 1200)
-      };
-    });
-
-    return {
-      url: page.url(),
-      routeId: this.matchKnownRoute(page.url()),
-      title: result.title || undefined,
-      headings: result.headings,
-      paragraphs: result.paragraphs,
-      formLabels: result.formLabels,
-      buttons: result.buttons,
-      links: result.links,
-      snippet: result.snippet
-    };
+    return readPageSectionsDiagnostic(page);
   }
 
   private async discoverLinks(
@@ -804,37 +654,13 @@ export class SelfMaxPlaywrightClient {
   }> {
     const page = this.pageOrThrow();
     await this.navigateForRead(route, explicitUrl);
-
-    const links = await page.evaluate(() => {
-      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
-      return Array.from(document.querySelectorAll("a[href]"))
-        .map((el) => ({
-          text: normalize(el.textContent || ""),
-          href: (el as HTMLAnchorElement).href || ""
-        }))
-        .filter((item) => item.href);
-    });
-
-    return {
-      url: page.url(),
-      routeId: this.matchKnownRoute(page.url()),
-      links: links.map((link) => ({ ...link, routeId: this.matchKnownRoute(link.href) }))
-    };
+    return discoverLinksDiagnostic(page);
   }
 
   private async listGoals(filter: string): Promise<{
     filter: string;
-    auth: { valid: boolean; archivedCount: number | null; activeCount: number | null; completeCount: number | null; allCount: number | null };
-    goals: Array<{
-      title: string;
-      goalId?: string;
-      category?: string;
-      dueLabel?: string;
-      progressLabel?: string;
-      taskSummaryLabel?: string;
-      taskPreviewItems?: string[];
-      taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-    }>;
+    auth: AuthState;
+    goals: GoalSummary[];
   }> {
     const page = this.pageOrThrow();
     await this.ensureOnGoals();
@@ -853,16 +679,7 @@ export class SelfMaxPlaywrightClient {
 
     const goals = await page.evaluate(() => {
       const rows = Array.from(document.querySelectorAll("article, section, li, div"));
-      const extracted: Array<{
-        title: string;
-        goalId?: string;
-        category?: string;
-        dueLabel?: string;
-        progressLabel?: string;
-        taskSummaryLabel?: string;
-        taskPreviewItems?: string[];
-        taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-      }> = [];
+      const extracted: GoalSummary[] = [];
       const categories = ["health", "work", "love", "family", "social", "fun", "dreams", "meaning"];
 
       for (const row of rows) {
@@ -911,121 +728,14 @@ export class SelfMaxPlaywrightClient {
         extracted.push({ title, goalId: idMatch?.[1], category, dueLabel, progressLabel, taskSummaryLabel, taskPreviewItems, taskPanelState });
       }
 
-      const dedup = new Map<
-        string,
-        {
-          title: string;
-          goalId?: string;
-          category?: string;
-          dueLabel?: string;
-          progressLabel?: string;
-          taskSummaryLabel?: string;
-          taskPreviewItems?: string[];
-          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-        }
-      >();
-      for (const item of extracted) {
-        if (!dedup.has(item.title)) {
-          dedup.set(item.title, item);
-        }
-      }
-      return [...dedup.values()];
+      return extracted;
     });
 
-    const summaryGoals = await page.evaluate(() => {
-        const lines = (document.body.innerText || "").split(/\n+/).map((line) => line.trim()).filter(Boolean);
-        const filters = new Set(["Active", "Complete", "Archived", "All"]);
-        const categories = new Set(["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"]);
-        const out: Array<{
-          title: string;
-          category?: string;
-          dueLabel?: string;
-          progressLabel?: string;
-          taskSummaryLabel?: string;
-          taskPreviewItems?: string[];
-          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-        }> = [];
-        let inGoals = false;
-
-        for (let i = 0; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (/^YOUR GOALS$/i.test(line)) {
-            inGoals = true;
-            continue;
-          }
-          if (!inGoals) continue;
-          if (filters.has(line.replace(/\s*\(\d+\)$/, "")) || /^SHOW GOALS:?$/i.test(line)) {
-            continue;
-          }
-          if (/^No .* goals found\.?$/i.test(line)) {
-            break;
-          }
-          const next = lines[i + 1] ?? "";
-          const next2 = lines[i + 2] ?? "";
-          const next3 = lines[i + 3] ?? "";
-          if (categories.has(next) && /^Due\s/i.test(next2)) {
-            const tail = lines.slice(i + 4, i + 20);
-            const startIdx = tail.findIndex((line) => /^START$/i.test(line));
-            const segment = startIdx === -1 ? tail : tail.slice(0, startIdx);
-            const taskSummaryLabel = segment.find((line) => /tasks completed|No tasks/i.test(line));
-            const taskPreviewItems = segment.filter(
-              (line) =>
-                line !== taskSummaryLabel &&
-                !/^\d+%$/i.test(line) &&
-                !/^ADD TASKS$/i.test(line) &&
-                line.length > 0
-            );
-            const taskPanelState =
-              taskSummaryLabel && /tasks completed/i.test(taskSummaryLabel)
-                ? "tasks_present"
-                : segment.some((line) => /^ADD TASKS$/i.test(line))
-                  ? "add_tasks"
-                  : "empty";
-            out.push({
-              title: line,
-              category: next,
-              dueLabel: next2,
-              progressLabel: /%|tasks completed/i.test(next3) ? next3 : undefined,
-              taskSummaryLabel,
-              taskPreviewItems: taskPreviewItems.slice(0, 12),
-              taskPanelState
-            });
-          }
-        }
-
-        const dedup = new Map<
-          string,
-          {
-            title: string;
-            category?: string;
-            dueLabel?: string;
-            progressLabel?: string;
-            taskSummaryLabel?: string;
-            taskPreviewItems?: string[];
-            taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-          }
-        >();
-        for (const item of out) {
-          if (!dedup.has(item.title)) dedup.set(item.title, item);
-        }
-        return [...dedup.values()];
-      });
+    const summaryGoals = extractGoalSummariesFromText(await page.locator("body").innerText().catch(() => ""));
 
     let extractedGoals = goals;
     if (summaryGoals.length > 0) {
-      const merged = new Map<
-        string,
-        {
-          title: string;
-          goalId?: string;
-          category?: string;
-          dueLabel?: string;
-          progressLabel?: string;
-          taskSummaryLabel?: string;
-          taskPreviewItems?: string[];
-          taskPanelState?: "tasks_present" | "add_tasks" | "empty";
-        }
-      >();
+      const merged = new Map<string, GoalSummary>();
       for (const item of goals) {
         merged.set(item.title, item);
       }
@@ -1037,15 +747,16 @@ export class SelfMaxPlaywrightClient {
           goalId: existing?.goalId
         });
       }
-      extractedGoals = [...merged.values()];
+      extractedGoals = dedupeGoalSummaries([...merged.values()]);
     } else if (extractedGoals.length === 0) {
       extractedGoals = summaryGoals;
     }
 
     for (const goal of extractedGoals) {
-      if (goal.goalId) {
+      const resolvedGoalId = goal.goalId ?? this.findGoalIdByTitle(goal.title);
+      if (resolvedGoalId) {
         this.cacheGoal({
-          goalId: goal.goalId,
+          goalId: resolvedGoalId,
           title: goal.title,
           category: goal.category,
           dueLabel: goal.dueLabel,
@@ -1116,12 +827,13 @@ export class SelfMaxPlaywrightClient {
     }
 
     const listed = await this.listGoals("active");
-    const match = listed.goals.find((goal) => (goalId && goal.goalId === goalId) || (goalTitle && goal.title === goalTitle));
+    const resolvedTitle = goalTitle ?? (goalId ? this.entityCache.goalsById[goalId]?.title : undefined);
+    const match = listed.goals.find((goal) => (goalId && goal.goalId === goalId) || (resolvedTitle && goal.title === resolvedTitle));
     if (!match) {
       return null;
     }
     return {
-      goalId: match.goalId,
+      goalId: match.goalId ?? this.findGoalIdByTitle(match.title),
       title: match.title,
       taskPanelState: match.taskPanelState ?? "empty",
       taskSummaryLabel: match.taskSummaryLabel,
@@ -1268,39 +980,14 @@ export class SelfMaxPlaywrightClient {
     const workspaceVisible = await this.isGoalWorkspaceVisible();
     const snippet = await this.readBodySnippet();
 
-    const snapshot = await page.evaluate(() => {
-      const names = ["DESIRE", "ENVIRONMENT", "MENTALITY", "ACTIONS", "SITUATION", "FEEDBACK"];
-      const textLines = (document.body.innerText || "").split(/\n+/).map((v) => v.trim()).filter(Boolean);
-      const blocks: Array<{ name: string; state: string; prompts: string[] }> = [];
+    const text = await page.locator("body").innerText().catch(() => "");
+    const snapshot = {
+      url: page.url(),
+      title: extractGoalTitleFromWorkspace(text),
+      statusBlocks: extractGoalStatusBlocks(text)
+    };
 
-      for (const name of names) {
-        const idx = textLines.findIndex((line) => line.toUpperCase() === name);
-        if (idx === -1) continue;
-        const state = textLines[idx + 1] ?? "";
-        const prompts: string[] = [];
-        for (let i = idx + 2; i < Math.min(textLines.length, idx + 8); i += 1) {
-          const line = textLines[i];
-          if (names.includes(line.toUpperCase())) break;
-          if (line.length > 0) prompts.push(line);
-        }
-        blocks.push({ name, state, prompts });
-      }
-
-      const title = (() => {
-        const lines = textLines;
-        const marker = lines.findIndex((line) => /Current Goal/i.test(line));
-        if (marker !== -1) return lines[marker + 1] || "";
-        return "";
-      })();
-
-      return {
-        url: location.href,
-        title,
-        statusBlocks: blocks
-      };
-    });
-
-    const resolvedGoalId = goalId ?? this.goalIdFromUrl(snapshot.url);
+    const resolvedGoalId = goalId ?? goalIdFromUrl(snapshot.url);
     const resolvedGoalTitle = goalTitle ?? (snapshot.title || undefined);
     if (resolvedGoalId) {
       this.cacheGoal({ goalId: resolvedGoalId, title: resolvedGoalTitle });
@@ -1348,7 +1035,7 @@ export class SelfMaxPlaywrightClient {
       };
     });
 
-    const resolvedGoalId = goalId ?? this.goalIdFromUrl(page.url());
+    const resolvedGoalId = goalId ?? goalIdFromUrl(page.url());
     const resolvedGoalTitle = goalTitle ?? (result.currentGoal || undefined);
     if (resolvedGoalId) {
       this.cacheGoal({
@@ -1383,9 +1070,9 @@ export class SelfMaxPlaywrightClient {
     category?: string;
     dueLabel?: string;
     progressLabel?: string;
-    statusBlocks: Array<{ name: string; state: string; prompts: string[] }>;
+      statusBlocks: GoalStatusBlock[];
     messages: string[];
-    tasks: Array<{ text: string; completed: boolean }>;
+      tasks: TaskItem[];
     taskReadReason?: string;
     snippet: string;
   }> {
@@ -1452,32 +1139,16 @@ export class SelfMaxPlaywrightClient {
     await this.openTaskPanel();
     const panel = await this.resolveTaskPanel();
     const taskPanelVisible = Boolean(panel && (await panel.count()) > 0);
-    const result = await page.evaluate(() => {
-      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
-      const candidates = Array.from(document.querySelectorAll("body *")).filter((el) =>
-        /TASKS|Add new task|Use the task suggestion tool|How will you accomplish|Select Tasks/i.test(
-          normalize((el as HTMLElement).innerText || el.textContent || "")
-        )
-      );
-      return {
-        nearbyTexts: candidates
-          .slice(0, 20)
-          .map((el) => normalize((el as HTMLElement).innerText || el.textContent || ""))
-          .filter(Boolean),
-        nearbyHtml: candidates.slice(0, 10).map((el) => (el as HTMLElement).outerHTML.slice(0, 600)),
-        snippet: normalize(document.body.innerText || "").slice(0, 1200)
-      };
-    });
+    const result = await readTaskPanelSnapshotDiagnostic(
+      page,
+      panel ? ((await panel.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || undefined) : undefined,
+      taskPanelVisible
+    );
 
     return {
-      goalId: goalId ?? this.goalIdFromUrl(page.url()),
+      goalId: goalId ?? goalIdFromUrl(page.url()),
       goalTitle,
-      url: page.url(),
-      taskPanelVisible,
-      taskPanelText: panel ? ((await panel.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || undefined) : undefined,
-      nearbyTexts: result.nearbyTexts,
-      nearbyHtml: result.nearbyHtml,
-      snippet: result.snippet
+      ...result
     };
   }
 
@@ -1714,54 +1385,7 @@ export class SelfMaxPlaywrightClient {
     const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
     await page.goto(`${base}/lifestorming`, { waitUntil: "domcontentloaded" });
     await this.waitForPageTextNotContaining("Loading Lifestorming Page...", 8000);
-
-    const result = await page.evaluate(() => {
-      const lines = (document.body.innerText || "").split(/\n+/).map((v) => v.trim()).filter(Boolean);
-      const stepTexts = lines.filter((line) => /^STEP\s+\d+:|^Step\s+\d+:|^LIFESTORMING$|^BRAINSTORM$|^YOUR LIFE$/i.test(line)).slice(0, 16);
-      const visibleDesires = lines.filter(
-        (line) =>
-          line.length > 2 &&
-          !/SELF-IMPROVE|SELF-AWARENESS|COMMUNITY|Help|More|LIFESTORMING|BRAINSTORM|YOUR LIFE|STEP \d+:|GO|VIEW|ADD TO GOALS/i.test(
-            line
-          )
-      ).slice(0, 20);
-
-      const extractSectionItems = (headingPattern: RegExp, stopPattern: RegExp): string[] => {
-        const start = lines.findIndex((line) => headingPattern.test(line));
-        if (start === -1) return [];
-        const items: string[] = [];
-        for (let i = start + 1; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (stopPattern.test(line)) break;
-          if (
-            /^GO$|^VIEW$|^ADD TO GOALS$|^BEGIN$|^No desires to practice yet\.?$|^No desires selected for final selection yet\.?$/i.test(line) ||
-            /Now that you have a list of DESIRES|How would it feel\?|Spend a few minutes on your DESIRES|Or, you can delete it|Now you know how you feel!/i.test(line)
-          ) {
-            continue;
-          }
-          if (
-            line.length > 1 &&
-            !/^STEP\s+\d+/i.test(line) &&
-            !/^LIFESTORMING$|^BRAINSTORM$|^YOUR LIFE$/i.test(line)
-          ) {
-            items.push(line);
-          }
-        }
-        return [...new Set(items)];
-      };
-
-      const feelItOut = extractSectionItems(/^STEP 2:\s*FEEL IT OUT$/i, /^STEP 3:\s*START A GOAL$/i);
-      const startGoal = extractSectionItems(/^STEP 3:\s*START A GOAL$/i, /^Self-Max is an AI-driven/i);
-      return {
-        stepTexts,
-        visibleDesires,
-        desiresBySection: [
-          { section: "feel_it_out" as const, items: feelItOut },
-          { section: "start_a_goal" as const, items: startGoal }
-        ],
-        snippet: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 800)
-      };
-    });
+    const result = extractLifestormingOverview(await page.locator("body").innerText().catch(() => ""));
 
     for (const section of result.desiresBySection) {
       for (const title of section.items) {
@@ -1810,52 +1434,20 @@ export class SelfMaxPlaywrightClient {
       await this.waitForDesiresCategory(category);
     }
 
-    const result = await page.evaluate(() => {
-      const lines = (document.body.innerText || "").split(/\n+/).map((v) => v.trim()).filter(Boolean);
-      const categories = ["HEALTH", "WORK", "LOVE", "FAMILY", "SOCIAL", "FUN", "DREAMS", "MEANING"];
-      const anchors = Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
+    const text = await page.locator("body").innerText().catch(() => "");
+    const result = extractLifestormingCategory(text, new URL(page.url()).pathname);
+    const anchors = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
         const href = (el as HTMLAnchorElement).href || "";
         const match = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
         return { text: (el.textContent || "").trim(), desireId: match?.[1] };
-      });
-      const pathMatch = location.pathname.match(/\/lifestorming\/desires-selection\/([^/?#]+)/i);
-      const selectedFromPath = (pathMatch?.[1] || "").toUpperCase();
-      const visibleCategories = lines.filter((line) => categories.includes(line.toUpperCase()) && line === line.toUpperCase());
-      const selected = categories.includes(selectedFromPath)
-        ? selectedFromPath
-        : visibleCategories[visibleCategories.length - 1] || "";
-      const idx = selected ? lines.findIndex((line) => line === selected) : -1;
-      const intro = idx !== -1 ? lines.slice(idx + 1, idx + 4).join(" ") : "";
-      const items: Array<{ title: string; desireId?: string }> = [];
-      if (idx !== -1) {
-        for (let i = idx + 1; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (categories.includes(line.toUpperCase()) && i !== idx) break;
-          if (/Add an item|^Add$|NEXT STEP|Spend a few minutes|Think of something|Click on a category|No items in this bucket yet/i.test(line)) {
-            continue;
-          }
-          if (line.length > 1 && !/^[A-Z ]+$/.test(line)) {
-            const linked = anchors.find((anchor) => anchor.text === line);
-            items.push({ title: line, desireId: linked?.desireId });
-          }
-        }
-      }
-      const dedup = new Map<string, { title: string; desireId?: string }>();
-      for (const item of items) {
-        if (!dedup.has(item.title)) dedup.set(item.title, item);
-      }
-      return {
-        category: selected || undefined,
-        intro: intro || undefined,
-        items: [...dedup.values()],
-        snippet: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 900)
-      };
-    });
-
-    const normalizedCategory = result.category ? this.titleCase(result.category) : undefined;
+      })
+    );
+    const normalizedCategory = result.category ? titleCase(result.category) : undefined;
     for (const item of result.items) {
-      if (item.desireId) {
-        this.cacheDesire({ desireId: item.desireId, title: item.title, category: normalizedCategory });
+      const linked = anchors.find((anchor) => anchor.text === item);
+      if (linked?.desireId) {
+        this.cacheDesire({ desireId: linked.desireId, title: item, category: normalizedCategory });
       }
     }
 
@@ -1863,7 +1455,7 @@ export class SelfMaxPlaywrightClient {
       url: page.url(),
       category: result.category,
       intro: result.intro,
-      items: result.items.map((item) => item.title),
+      items: result.items,
       snippet: result.snippet
     };
   }
@@ -1924,37 +1516,9 @@ export class SelfMaxPlaywrightClient {
     }
     await this.waitForPageTextNotContaining("Loading...", 8000);
 
-    const result = await page.evaluate(() => {
-      const lines = (document.body.innerText || "").split(/\n+/).map((v) => v.trim()).filter(Boolean);
-      const categories = ["HEALTH", "WORK", "LOVE", "FAMILY", "SOCIAL", "FUN", "DREAMS", "MEANING"];
-      const title = lines.find(
-        (line) =>
-          !categories.includes(line.toUpperCase()) &&
-          !/Self-Max Logo|SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|Help|More|SAVE|EXIT|DELETE DESIRE|Loading/i.test(
-            line
-          )
-      ) || "";
-      const category = lines.find((line) => categories.includes(line.toUpperCase())) || "";
-      const promptStart = lines.findIndex((line) => /Take a few minutes to think about adding this DESIRE/i.test(line));
-      const prompts: string[] = [];
-      if (promptStart !== -1) {
-        for (let i = promptStart; i < lines.length; i += 1) {
-          const line = lines[i];
-          if (/^(SAVE|EXIT|DELETE DESIRE)$/i.test(line)) break;
-          if (line.length > 0) prompts.push(line);
-        }
-      }
-      const actions = lines.filter((line) => /^(SAVE|EXIT|DELETE DESIRE)$/i.test(line));
-      return {
-        title,
-        category,
-        prompts,
-        actions,
-        snippet: (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 1000)
-      };
-    });
+    const result = extractSensationPractice(await page.locator("body").innerText().catch(() => ""));
 
-    const resolvedDesireId = desireId ?? this.extractRouteParams(page.url()).desireId;
+    const resolvedDesireId = desireId ?? extractRouteParams(page.url()).desireId;
     if (resolvedDesireId && result.title && !/Desire not found\.?/i.test(result.title)) {
       this.cacheDesire({
         desireId: resolvedDesireId,
@@ -2306,56 +1870,11 @@ export class SelfMaxPlaywrightClient {
   }
 
   private matchKnownRoute(url: string): KnownRouteId | undefined {
-    try {
-      const parsed = new URL(url);
-      const normalized = `${parsed.origin}${parsed.pathname}${parsed.search}`;
-      const entries = Object.entries(knownRoutes) as Array<[KnownRouteId, string]>;
-      for (const [routeId, routeUrl] of entries) {
-        if (normalized === routeUrl) {
-          return routeId;
-        }
-      }
-      if (parsed.pathname === "/auth") {
-        if (parsed.searchParams.get("mode") === "sign-in" && parsed.searchParams.get("v") === "b") {
-          return "signin";
-        }
-        if (parsed.searchParams.get("mode") === "sign-up" && parsed.searchParams.get("v") === "b") {
-          return "signup";
-        }
-        if (parsed.searchParams.get("mode") === "sign-up") {
-          return "auth_signup_alt";
-        }
-        return "auth";
-      }
-      if (parsed.pathname === "/goals") return "goals";
-      if (parsed.pathname === "/home") return "home_legacy";
-      if (parsed.pathname === "/lifestorming") return "lifestorming";
-      if (parsed.pathname.startsWith("/lifestorming/desires-selection")) return "lifestorming_desires_selection";
-    } catch {
-      return undefined;
-    }
-    return undefined;
+    return matchKnownRoute(url);
   }
 
   private extractRouteParams(url: string): Record<string, string> {
-    try {
-      const parsed = new URL(url);
-      const params: Record<string, string> = {};
-      for (const [key, value] of parsed.searchParams.entries()) {
-        params[key] = value;
-      }
-      const desirePracticeMatch = parsed.pathname.match(/\/lifestorming\/sensation-practice\/([^/?#]+)/i);
-      if (desirePracticeMatch?.[1]) {
-        params.desireId = desirePracticeMatch[1];
-      }
-      const desiresSelectionMatch = parsed.pathname.match(/\/lifestorming\/desires-selection\/([^/?#]+)/i);
-      if (desiresSelectionMatch?.[1] && desiresSelectionMatch[1] !== "category") {
-        params.category = desiresSelectionMatch[1];
-      }
-      return params;
-    } catch {
-      return {};
-    }
+    return extractRouteParams(url);
   }
 
   private async invokeKnownAction(payload: Record<string, unknown>): Promise<{ invoked: KnownActionId }> {
@@ -2417,14 +1936,14 @@ export class SelfMaxPlaywrightClient {
         }
       },
       async () => {
-        await this.tryClickByText(page, ["TASKS", "Tasks"]);
+        await this.tryClickByText(page, textSelectors(selectors.tasks.taskTab));
       },
       async () => {
         await this.tryClickByText(page, ["EDIT", "Edit"]);
         if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
           await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
         } else {
-          await this.tryClickByText(page, ["TASKS", "Tasks"]);
+          await this.tryClickByText(page, textSelectors(selectors.tasks.taskTab));
         }
       }
     ];
@@ -2435,6 +1954,10 @@ export class SelfMaxPlaywrightClient {
         return;
       }
     }
+    throw new StateError("task panel did not open", {
+      action: "inspect TASKS selector tiers",
+      detail: "button click succeeded but no task panel anchor became visible"
+    });
   }
 
   private async openGoalContext(goalTitle: string): Promise<void> {
@@ -2487,8 +2010,7 @@ export class SelfMaxPlaywrightClient {
   }
 
   private async readBodySnippet(): Promise<string> {
-    const page = this.pageOrThrow();
-    return (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 500);
+    return readBodySnippet(this.pageOrThrow());
   }
 
   private async waitForGoalDataLoaded(timeoutMs = 8000): Promise<void> {
@@ -2639,17 +2161,7 @@ export class SelfMaxPlaywrightClient {
   }
 
   private async resolveFirstVisible(page: Page, selectors: string[]): Promise<Locator> {
-    for (const selector of selectors) {
-      const input = page.locator(selector).first();
-      if ((await input.count()) === 0) {
-        continue;
-      }
-      if (!(await input.isVisible().catch(() => false))) {
-        continue;
-      }
-      return input;
-    }
-    throw new Error(`could not locate any input for selectors: ${selectors.join(", ")}`);
+    return resolveFirstVisible(page, selectors);
   }
 
   private async resolveDesireInput(): Promise<Locator> {
@@ -2717,7 +2229,7 @@ export class SelfMaxPlaywrightClient {
   private async selectCreateGoalCategory(category: string): Promise<boolean> {
     const page = this.pageOrThrow();
     const prompt = page.getByText(/Choose a category for your goal/i).first();
-    const variants = [this.titleCase(category), category.toUpperCase(), category.toLowerCase()];
+    const variants = [titleCase(category), category.toUpperCase(), category.toLowerCase()];
 
     if ((await prompt.count()) > 0) {
       const container = prompt.locator("xpath=ancestor::*[self::section or self::article or self::div][1]");
@@ -2793,7 +2305,10 @@ export class SelfMaxPlaywrightClient {
     }
     const page = this.pageOrThrow();
     const snippet = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 500);
-    throw new Error(`could not locate goal task panel (url=${page.url()} snippet=${snippet})`);
+    throw new StateError(`could not locate goal task panel (url=${page.url()} snippet=${snippet})`, {
+      action: "inspect task panel anchors",
+      detail: "task UI may have moved or stayed collapsed"
+    });
   }
 
   private async isTaskPanelVisible(): Promise<boolean> {
@@ -2943,12 +2458,7 @@ export class SelfMaxPlaywrightClient {
   }
 
   private goalIdFromUrl(url: string): string | undefined {
-    try {
-      const parsed = new URL(url);
-      return parsed.searchParams.get("goalId") ?? undefined;
-    } catch {
-      return undefined;
-    }
+    return goalIdFromUrl(url);
   }
 
   private async tryClickGoalCardAction(goalTitle: string, actionTexts: string[]): Promise<boolean> {
@@ -2966,31 +2476,11 @@ export class SelfMaxPlaywrightClient {
   }
 
   private async clickByText(root: SearchRoot, texts: string[], scope?: Locator): Promise<void> {
-    const clicked = await this.tryClickByText(root, texts, scope);
-    if (!clicked) {
-      throw new Error(`could not click any of: ${texts.join(", ")}`);
-    }
+    await clickByText(root, texts, scope);
   }
 
   private async tryClickByCss(root: SearchRoot, selectors: string[], scope?: Locator): Promise<boolean> {
-    const searchRoot: SearchRoot = scope ?? root;
-    for (const selector of selectors) {
-      const node = searchRoot.locator(selector).first();
-      if ((await node.count()) === 0) {
-        continue;
-      }
-      if (!(await node.isVisible().catch(() => false))) {
-        continue;
-      }
-      try {
-        await node.scrollIntoViewIfNeeded().catch(() => undefined);
-        await node.click({ timeout: 1500 });
-        return true;
-      } catch {
-        continue;
-      }
-    }
-    return false;
+    return tryClickByCss(root, selectors, scope);
   }
 
   private async ensureGoalsWorkspaceVisible(): Promise<void> {
@@ -3000,7 +2490,10 @@ export class SelfMaxPlaywrightClient {
       const snippet = (await page.locator("body").innerText().catch(() => ""))
         .replace(/\s+/g, " ")
         .slice(0, 500);
-      throw new Error(`login did not reach goals workspace (url=${page.url()} snippet=${snippet})`);
+      throw new AuthError(`login did not reach goals workspace (url=${page.url()} snippet=${snippet})`, {
+        action: "reuse a validated long-lived session",
+        detail: "goals workspace readiness never reached the archived-count threshold"
+      });
     }
   }
 
@@ -3019,8 +2512,8 @@ export class SelfMaxPlaywrightClient {
   private async isGoalsWorkspaceVisible(): Promise<boolean> {
     const page = this.pageOrThrow();
     const onGoalsUrl = /\/goals(\?|$)/.test(page.url());
-    const anchor = page.getByText(/WHAT DO YOU DESIRE TODAY\?/i).first();
-    const categories = page.getByText(/GOAL CATEGORIES/i).first();
+    const anchor = page.getByText(new RegExp(this.escapeRegex(textSelectors(selectors.goals.workspaceAnchors)[0]), "i")).first();
+    const categories = page.getByText(new RegExp(this.escapeRegex(textSelectors(selectors.goals.workspaceAnchors)[1]), "i")).first();
     const hasAnchorText = (await anchor.count()) > 0 || (await categories.count()) > 0;
     if (!(onGoalsUrl && hasAnchorText)) {
       return false;
@@ -3044,35 +2537,7 @@ export class SelfMaxPlaywrightClient {
   }
 
   private async tryClickByText(root: SearchRoot, texts: string[], scope?: Locator): Promise<boolean> {
-    const searchRoot: SearchRoot = scope ?? root;
-
-    for (const text of texts) {
-      const candidates = [
-        searchRoot.getByRole("button", { name: new RegExp(`^${this.escapeRegex(text)}$`, "i") }).first(),
-        searchRoot.getByRole("button", { name: new RegExp(this.escapeRegex(text), "i") }).first(),
-        searchRoot.getByRole("link", { name: new RegExp(this.escapeRegex(text), "i") }).first(),
-        searchRoot.getByText(text, { exact: true }).first(),
-        searchRoot.getByText(new RegExp(this.escapeRegex(text), "i")).first()
-      ];
-
-      for (const candidate of candidates) {
-        if ((await candidate.count()) === 0) {
-          continue;
-        }
-        if (!(await candidate.isVisible().catch(() => false))) {
-          continue;
-        }
-        try {
-          await candidate.scrollIntoViewIfNeeded().catch(() => undefined);
-          await candidate.click({ timeout: 1500 });
-          return true;
-        } catch {
-          continue;
-        }
-      }
-    }
-
-    return false;
+    return tryClickByText(root, texts, scope);
   }
 
   private escapeRegex(value: string): string {
@@ -3080,27 +2545,11 @@ export class SelfMaxPlaywrightClient {
   }
 
   private titleCase(value: string): string {
-    return value
-      .split(/[_\s-]+/)
-      .filter((part) => part.length > 0)
-      .map((part) => part[0].toUpperCase() + part.slice(1).toLowerCase())
-      .join(" ");
+    return titleCase(value);
   }
 
   private normalizeDateInput(input: string): string | null {
-    const trimmed = input.trim();
-    if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
-      return trimmed;
-    }
-
-    const mdy = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-    if (mdy) {
-      const month = mdy[1].padStart(2, "0");
-      const day = mdy[2].padStart(2, "0");
-      return `${mdy[3]}-${month}-${day}`;
-    }
-
-    return null;
+    return normalizeDateInput(input);
   }
 
   private cacheGoal(entry: {
@@ -3146,6 +2595,16 @@ export class SelfMaxPlaywrightClient {
     for (const entry of Object.values(this.entityCache.desiresById)) {
       if (entry.title?.trim().toLowerCase() === normalized) {
         return entry.desireId;
+      }
+    }
+    return undefined;
+  }
+
+  private findGoalIdByTitle(title: string): string | undefined {
+    const normalized = title.trim().toLowerCase();
+    for (const entry of Object.values(this.entityCache.goalsById)) {
+      if (entry.title?.trim().toLowerCase() === normalized) {
+        return entry.goalId;
       }
     }
     return undefined;

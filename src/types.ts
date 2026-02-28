@@ -74,3 +74,40 @@ export type SessionContext = {
   sessionId: string;
   userId: string;
 };
+
+export type GoalTaskPanelState = "tasks_present" | "add_tasks" | "empty";
+
+export type AuthState = {
+  valid: boolean;
+  archivedCount: number | null;
+  activeCount: number | null;
+  completeCount: number | null;
+  allCount: number | null;
+};
+
+export type GoalStatusBlock = {
+  name: string;
+  state: string;
+  prompts: string[];
+};
+
+export type TaskItem = {
+  text: string;
+  completed: boolean;
+};
+
+export type GoalSummary = {
+  title: string;
+  goalId?: string;
+  category?: string;
+  dueLabel?: string;
+  progressLabel?: string;
+  taskSummaryLabel?: string;
+  taskPreviewItems?: string[];
+  taskPanelState?: GoalTaskPanelState;
+};
+
+export type LifestormingSection = {
+  section: "feel_it_out" | "start_a_goal";
+  items: string[];
+};
