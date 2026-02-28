@@ -3,7 +3,6 @@ import { existsSync } from "node:fs";
 import { config } from "../core/config.js";
 import { AtomicExecutor } from "../core/atomic.js";
 import type { PrimitiveName, PrimitiveRequest, PrimitiveResponse, SessionContext } from "../core/types.js";
-import type { KnownRouteId } from "../platform/catalog.js";
 import { createReadPrimitiveHandlers, createWritePrimitiveHandlers } from "../api/index.js";
 import { clickByText, resolveFirstVisible, tryClickByCss, tryClickByText } from "../platform/navigation.js";
 import { formatError } from "../core/recovery.js";
@@ -132,15 +131,9 @@ export class SelfMaxPlaywrightClient {
       discoverLinks: (route, url) => this.authWorkflow.discoverLinks(route, url, (resolvedRoute, resolvedUrl) => this.authWorkflow.navigateForRead(resolvedRoute, resolvedUrl)),
       listGoals: (filter) => this.goalsWorkflow.listGoals(filter),
       discoverGoals: (waitMs) => this.goalsWorkflow.discoverGoals(waitMs),
-      readGoal: (goalTitle, goalId) => this.goalsWorkflow.readGoal(goalTitle, goalId),
-      readGoalMetadata: (goalTitle, goalId) => this.goalsWorkflow.readGoalMetadata(goalTitle, goalId),
-      readGoalWorkspace: (goalTitle, goalId) => this.goalsWorkflow.readGoalWorkspace(goalTitle, goalId),
       readGoalFull: (goalTitle, goalId) => this.goalsWorkflow.readGoalFull(goalTitle, goalId),
       readGoalStatusDetails: (goalTitle, goalId) => this.goalsWorkflow.readGoalStatusDetails(goalTitle, goalId),
-      readCachedGoals: () => this.goalsWorkflow.readCachedGoals(),
       readCachedDesires: () => this.lifestormingWorkflow.readCachedDesires(),
-      readTaskPanelSnapshot: (goalTitle, goalId) => this.goalsWorkflow.readTaskPanelSnapshot(goalTitle, goalId),
-      surveyActiveGoalTaskStates: () => this.goalsWorkflow.surveyActiveGoalTaskStates(),
       listGoalTasks: (goalTitle, goalId) => this.goalsWorkflow.listGoalTasks(goalTitle, goalId),
       readTaskSuggestions: (goalTitle) => this.goalsWorkflow.readTaskSuggestions(goalTitle, undefined),
       readGoalChat: (goalTitle, goalId) => this.goalsWorkflow.readGoalChat(goalTitle, goalId),
@@ -149,18 +142,12 @@ export class SelfMaxPlaywrightClient {
       readLifeHistoryAssessment: () => this.authWorkflow.readLifeHistoryAssessment(),
       readBigFiveAssessment: () => this.authWorkflow.readBigFiveAssessment(),
       readLifestormingOverview: () => this.lifestormingWorkflow.readLifestormingOverview(),
-      listLifestormingDesires: () => this.lifestormingWorkflow.listLifestormingDesires(),
-      readLifestormingCategory: (category) => this.lifestormingWorkflow.readLifestormingCategory(category),
-      readLifestormingFull: () => this.lifestormingWorkflow.readLifestormingFull(),
       readSensationPractice: (desireId, desireTitle) => this.lifestormingWorkflow.readSensationPractice(desireId, desireTitle),
-      readCoachMessages: () => this.authWorkflow.readCoachMessages(),
-      listKnownActions: (route) => this.authWorkflow.listKnownActions(route as KnownRouteId | null)
+      readCoachMessages: () => this.authWorkflow.readCoachMessages()
     }),
     ...createWritePrimitiveHandlers({
-      setState: (session, patch) => this.authWorkflow.setState(session, patch),
       talkToGuide: (message) => this.authWorkflow.talkToGuide(message),
       talkToGoalChat: (message, goalTitle) => this.authWorkflow.talkToGoalChat(message, goalTitle, (resolvedGoalTitle) => this.goalsSupport.openGoalContext(resolvedGoalTitle)),
-      sendCoachMessage: (message) => this.authWorkflow.sendCoachMessage(message),
       brainstormDesiresForEachCategory: (items) => this.lifestormingWorkflow.brainstormDesiresForEachCategory(items),
       feelOutDesires: (desires) => this.lifestormingWorkflow.feelOutDesires(desires),
       createGoalsFromDesires: (desires) => this.goalsWorkflow.createGoalsFromDesires(desires),
@@ -170,13 +157,7 @@ export class SelfMaxPlaywrightClient {
       addTasks: (goalTitle, goalId, tasks, useSuggestions) => this.goalsWorkflow.addTasks(goalTitle, goalId, tasks, useSuggestions),
       removeTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.removeTask(goalTitle, goalId, taskText),
       completeTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.completeTask(goalTitle, goalId, taskText),
-      uncompleteTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.uncompleteTask(goalTitle, goalId, taskText),
-      completeGoal: (goalTitle, goalId) => this.goalsWorkflow.completeGoal(goalTitle, goalId),
-      reactivateGoal: (goalTitle, goalId) => this.goalsWorkflow.reactivateGoal(goalTitle, goalId),
-      archiveGoal: (goalTitle, goalId) => this.goalsWorkflow.archiveGoal(goalTitle, goalId),
-      deleteGoal: (goalTitle, goalId) => this.goalsWorkflow.deleteGoal(goalTitle, goalId),
-      navigate: (route) => this.authWorkflow.navigate(route),
-      invokeKnownAction: (payload) => this.authWorkflow.invokeKnownAction(payload)
+      uncompleteTask: (goalTitle, goalId, taskText) => this.goalsWorkflow.uncompleteTask(goalTitle, goalId, taskText)
     })
   } satisfies Partial<Record<PrimitiveName, (req: PrimitiveRequest, session: SessionContext) => Promise<unknown>>>;
 

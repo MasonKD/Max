@@ -5,7 +5,7 @@ import { selectors, cssSelectors } from "../../platform/selectors.js";
 import { AuthError } from "../../core/recovery.js";
 import { matchKnownRoute, extractRouteParams, type SearchRoot } from "../../platform/navigation.js";
 import { readRouteSnapshotDiagnostic, readPageSectionsDiagnostic, discoverLinksDiagnostic } from "../../platform/diagnostics.js";
-import { knownRoutes, knownActions, actionById, type KnownActionId, type KnownRouteId } from "../../platform/catalog.js";
+import { knownRoutes, type KnownRouteId } from "../../platform/catalog.js";
 import { splitVisibleLines } from "../../platform/extractors.js";
 import { extractAssessmentQuestionState, extractLevelCheck, extractUnderstandOverview } from "../../platform/extractors.js";
 
@@ -139,25 +139,6 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
         action: "re-authenticate in a long-lived session",
         detail: "storage state did not restore a valid goals workspace"
       });
-    },
-
-    async setState(session: SessionContext, patch: Record<string, unknown>): Promise<Record<string, unknown>> {
-      const page = deps.ensurePage();
-      const key = deps.storageKeyFor(session);
-      return page.evaluate(
-        ({ storageKey, incoming }) => {
-          const currentRaw = window.localStorage.getItem(storageKey);
-          const current = currentRaw ? JSON.parse(currentRaw) : {};
-          const next = {
-            ...current,
-            ...incoming,
-            updatedAt: new Date().toISOString()
-          };
-          window.localStorage.setItem(storageKey, JSON.stringify(next));
-          return next;
-        },
-        { storageKey: key, incoming: patch }
-      );
     },
 
     async getState(session: SessionContext): Promise<Record<string, unknown>> {
@@ -356,32 +337,6 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
         const path = route.startsWith("/") ? route : `/${route}`;
         await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
       }
-    },
-
-    async listKnownActions(route: KnownRouteId | null): Promise<typeof knownActions> {
-      if (!route) {
-        return [...knownActions];
-      }
-      return knownActions.filter((action) => action.route === route);
-    },
-
-    async invokeKnownAction(payload: Record<string, unknown>): Promise<{ invoked: KnownActionId }> {
-      const page = deps.ensurePage();
-      const actionId = payload.actionId as KnownActionId | undefined;
-      if (!actionId) {
-        throw new Error("payload.actionId is required");
-      }
-      const action = actionById.get(actionId);
-      if (!action) {
-        throw new Error(`unknown actionId: ${actionId}`);
-      }
-      const message = payload.message;
-      if (typeof message === "string" && action.id === "goals.send_guide_message") {
-        const input = await deps.resolveChatInput();
-        await input.fill(message);
-      }
-      await page.click(action.selector);
-      return { invoked: action.id };
     },
 
     async ensureOnGoals(): Promise<void> {

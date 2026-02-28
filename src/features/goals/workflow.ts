@@ -3,7 +3,7 @@ import type { AuthState, GoalStatusBlock, GoalStatusDetail, GoalSummary, TaskIte
 import type { SearchRoot } from "../../platform/navigation.js";
 import { config } from "../../core/config.js";
 import { extractGoalsOverview, extractGoalSummariesFromText, dedupeGoalSummaries } from "../../platform/extractors.js";
-import { readTaskPanelSnapshotDiagnostic, readBodySnippet } from "../../platform/diagnostics.js";
+import { readBodySnippet } from "../../platform/diagnostics.js";
 import { goalIdFromUrl, normalizeDateInput, titleCase } from "../../platform/navigation.js";
 import { selectors, textSelectors } from "../../platform/selectors.js";
 import { StateError } from "../../core/recovery.js";
@@ -294,22 +294,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       return { filter: normalized, auth, goals: extractedGoals };
     },
 
-    async surveyActiveGoalTaskStates() {
-      const listed = await this.listGoals("active");
-      const goals = listed.goals.map((goal) => ({
-        title: goal.title,
-        goalId: goal.goalId,
-        category: goal.category,
-        progressLabel: goal.progressLabel,
-        taskSummaryLabel: goal.taskSummaryLabel,
-        taskPreviewItems: goal.taskPreviewItems,
-        taskPanelState: goal.taskPanelState ?? "empty"
-      }));
-      const counts = { tasks_present: 0, add_tasks: 0, empty: 0 };
-      for (const goal of goals) counts[goal.taskPanelState] += 1;
-      return { goals, counts };
-    },
-
     async discoverGoals(waitMs?: unknown) {
       const page = deps.pageOrThrow();
       await deps.ensureOnGoals();
@@ -364,27 +348,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       };
     },
 
-    async readGoal(goalTitle?: string, goalId?: string) {
-      await deps.openGoalForRead(goalTitle, goalId);
-      const page = deps.pageOrThrow();
-      const workspaceVisible = await deps.isGoalWorkspaceVisible();
-      const snapshot = await deps.captureCurrentGoalWorkspace();
-      const resolvedGoalId = goalId ?? goalIdFromUrl(page.url());
-      const resolvedGoalTitle = goalTitle ?? snapshot.title;
-      if (resolvedGoalId) deps.cacheGoal({ goalId: resolvedGoalId, title: resolvedGoalTitle });
-      return { goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, url: page.url(), workspaceVisible, snippet: snapshot.snippet, statusBlocks: snapshot.statusBlocks };
-    },
-
-    async readGoalMetadata(goalTitle?: string, goalId?: string) {
-      await deps.openGoalForRead(goalTitle, goalId);
-      const page = deps.pageOrThrow();
-      const result = await deps.captureCurrentGoalWorkspace();
-      const resolvedGoalId = goalId ?? goalIdFromUrl(page.url());
-      const resolvedGoalTitle = goalTitle ?? result.title;
-      if (resolvedGoalId) deps.cacheGoal({ goalId: resolvedGoalId, title: resolvedGoalTitle, category: result.category, dueLabel: result.dueLabel, progressLabel: result.progressLabel });
-      return { goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, url: page.url(), workspaceVisible: await deps.isGoalWorkspaceVisible(), category: result.category, dueLabel: result.dueLabel, progressLabel: result.progressLabel, snippet: result.snippet };
-    },
-
     async readGoalFull(goalTitle?: string, goalId?: string) {
       await deps.openGoalForRead(goalTitle, goalId);
       const page = deps.pageOrThrow();
@@ -431,27 +394,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         };
       });
       return { goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, url: page.url(), details };
-    },
-
-    async readCachedGoals() {
-      return { goals: Object.values(deps.entityGoals()).sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)) };
-    },
-
-    async readTaskPanelSnapshot(goalTitle?: string, goalId?: string) {
-      await deps.openGoalForRead(goalTitle, goalId);
-      const page = deps.pageOrThrow();
-      await deps.openTaskPanel();
-      const panel = await deps.resolveTaskPanel();
-      const taskPanelVisible = Boolean(panel && (await panel.count()) > 0);
-      const result = await readTaskPanelSnapshotDiagnostic(page, panel ? ((await panel.innerText().catch(() => "")).replace(/\s+/g, " ").trim() || undefined) : undefined, taskPanelVisible);
-      return { goalId: goalId ?? goalIdFromUrl(page.url()), goalTitle, ...result };
-    },
-
-    async readGoalWorkspace(goalTitle?: string, goalId?: string) {
-      await deps.openGoalForRead(goalTitle, goalId);
-      const page = deps.pageOrThrow();
-      const result = await deps.captureCurrentGoalWorkspace();
-      return { goalId: goalId ?? goalIdFromUrl(page.url()), goalTitle: goalTitle ?? result.title, url: page.url(), workspaceVisible: await deps.isGoalWorkspaceVisible(), tabs: result.tabs, currentGoal: result.title, snippet: result.snippet };
     },
 
     async listGoalTasks(goalTitle?: string, goalId?: string): Promise<{ goalId?: string; goalTitle?: string; url: string; workspaceVisible: boolean; reason?: string; snippet?: string; tasks: TaskItem[] }> {
@@ -670,17 +612,28 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         const due = await this.updateGoalDueDate(goalTitle, undefined, updates.dueDate);
         applied.dueDate = due.dueDate;
       }
-      if (updates.status === "completed") {
-        await this.completeGoal(goalTitle, undefined);
-        applied.status = "completed";
-      } else if (updates.status === "archived") {
-        await this.archiveGoal(goalTitle, undefined);
-        applied.status = "archived";
-      } else if (updates.status === "active") {
-        await this.reactivateGoal(goalTitle, undefined);
-        applied.status = "active";
+      if (updates.status) {
+        await this.setGoalStatus(goalTitle, undefined, updates.status);
+        applied.status = updates.status;
       }
       return applied;
+    },
+
+    async setGoalStatus(goalTitle?: string, goalId?: string, status?: "active" | "completed" | "archived") {
+      if (!status) throw new Error("setGoalStatus requires status");
+      await deps.ensureOnGoals();
+      const before = {
+        active: await deps.readGoalCount("Active"),
+        complete: await deps.readGoalCount("Complete"),
+        archived: await deps.readGoalCount("Archived")
+      };
+      const resolved = await resolveGoalIdentity(goalTitle, goalId);
+      const opened = await deps.openGoalEditPanel();
+      const done = Boolean(opened) && await deps.clickGoalStatusAction(status);
+      if (!done) throw new Error(`could not set goal status: ${status}`);
+      const transitioned = await waitForGoalStatusChange(status, resolved.goalTitle, before);
+      if (!transitioned) throw new Error(`setGoalStatus postcondition failed: ${status}`);
+      return { goalTitle: resolved.goalTitle, goalId: resolved.goalId, status };
     },
 
     async startGoal(goalTitle?: string, goalId?: string): Promise<{ started: boolean; goalTitle?: string; goalId?: string }> {
@@ -826,76 +779,6 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         if (!regressed) throw new Error(`uncomplete_task postcondition failed: ${taskText}`);
       }
       return { uncompleted: true, taskText };
-    },
-
-    async completeGoal(goalTitle?: string, goalId?: string) {
-      await deps.ensureOnGoals();
-      const before = {
-        active: await deps.readGoalCount("Active"),
-        complete: await deps.readGoalCount("Complete"),
-        archived: await deps.readGoalCount("Archived")
-      };
-      const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const opened = await deps.openGoalEditPanel();
-      const done = Boolean(opened) && await deps.clickGoalStatusAction("completed");
-      if (!done) throw new Error("could not complete goal");
-      const transitioned = await waitForGoalStatusChange("completed", resolved.goalTitle, before);
-      if (!transitioned) throw new Error("complete_goal postcondition failed");
-      return { completed: true, goalTitle: resolved.goalTitle, goalId: resolved.goalId };
-    },
-
-    async archiveGoal(goalTitle?: string, goalId?: string) {
-      await deps.ensureOnGoals();
-      const before = {
-        active: await deps.readGoalCount("Active"),
-        complete: await deps.readGoalCount("Complete"),
-        archived: await deps.readGoalCount("Archived")
-      };
-      const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const opened = await deps.openGoalEditPanel();
-      const done = Boolean(opened) && await deps.clickGoalStatusAction("archived");
-      if (!done) throw new Error("could not archive goal");
-      const transitioned = await waitForGoalStatusChange("archived", resolved.goalTitle, before);
-      if (!transitioned) throw new Error("archive_goal postcondition failed");
-      return { archived: true, goalTitle: resolved.goalTitle, goalId: resolved.goalId };
-    },
-
-    async reactivateGoal(goalTitle?: string, goalId?: string) {
-      await deps.ensureOnGoals();
-      const before = {
-        active: await deps.readGoalCount("Active"),
-        complete: await deps.readGoalCount("Complete"),
-        archived: await deps.readGoalCount("Archived")
-      };
-      const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const opened = await deps.openGoalEditPanel();
-      const done = Boolean(opened) && await deps.clickGoalStatusAction("active");
-      if (!done) throw new Error("could not reactivate goal");
-      const transitioned = await waitForGoalStatusChange("active", resolved.goalTitle, before);
-      if (!transitioned) throw new Error("reactivate_goal postcondition failed");
-      return { reactivated: true, goalTitle: resolved.goalTitle, goalId: resolved.goalId };
-    },
-
-    async deleteGoal(goalTitle?: string, goalId?: string) {
-      await deps.ensureOnGoals();
-      const page = deps.pageOrThrow();
-      if (goalId) {
-        await deps.openGoalContextById(goalId);
-      } else if (goalTitle) {
-        const clicked = await deps.tryClickGoalCardAction(goalTitle, ["DELETE", "Delete", "Remove"]);
-        if (clicked) {
-          await deps.tryClickByText(page, ["Delete", "Confirm", "Yes", "YES"]);
-          return { deleted: true, goalTitle, goalId };
-        }
-        await deps.openGoalContext(goalTitle);
-      } else if (!page.url().includes("/self-maximize")) {
-        await this.startGoal();
-      }
-      await deps.tryClickByText(page, ["EDIT", "Edit"]);
-      const deleted = await deps.tryClickByText(page, ["DELETE GOAL", "Delete Goal", "DELETE", "Delete", "Remove"]);
-      if (!deleted) throw new Error("could not locate delete action for goal");
-      await deps.tryClickByText(page, ["Delete", "Confirm", "Yes", "YES"]);
-      return { deleted: true, goalTitle, goalId: goalId ?? goalIdFromUrl(page.url()) };
     },
 
   };

@@ -1,21 +1,16 @@
 import type {
-  KnownActionInvocation,
   PrimitiveName,
   PrimitiveRequest,
-  SessionContext,
-  StatePatch
+  SessionContext
 } from "../core/types.js";
 import type { PrimitiveHandler } from "./primitives-read.js";
-import type { KnownRouteId } from "../platform/catalog.js";
 
 export type PrimitiveWriteResult = object;
 
 export type WritePrimitiveDependencies = {
-  setState: (session: SessionContext, patch: StatePatch) => Promise<PrimitiveWriteResult>;
   talkToGuide: (message: string) => Promise<PrimitiveWriteResult>;
   talkToGoalChat: (message: string, goalTitle: string) => Promise<PrimitiveWriteResult>;
-  sendCoachMessage: (message: string) => Promise<PrimitiveWriteResult>;
-  brainstormDesiresForEachCategory: (itemsByCategory: StatePatch) => Promise<PrimitiveWriteResult>;
+  brainstormDesiresForEachCategory: (itemsByCategory: Record<string, unknown>) => Promise<PrimitiveWriteResult>;
   feelOutDesires: (desires: unknown[]) => Promise<PrimitiveWriteResult>;
   createGoalsFromDesires: (desires: unknown[]) => Promise<PrimitiveWriteResult>;
   createGoal: (input: { title: string; category: string; dueDate: string }) => Promise<PrimitiveWriteResult>;
@@ -25,12 +20,6 @@ export type WritePrimitiveDependencies = {
   removeTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
   completeTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
   uncompleteTask: (goalTitle: string | undefined, goalId: string | undefined, taskText: string) => Promise<PrimitiveWriteResult>;
-  completeGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  reactivateGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  archiveGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  deleteGoal: (goalTitle?: string, goalId?: string) => Promise<PrimitiveWriteResult>;
-  navigate: (route: KnownRouteId) => Promise<PrimitiveWriteResult>;
-  invokeKnownAction: (payload: KnownActionInvocation) => Promise<PrimitiveWriteResult>;
 };
 
 function asOptionalString(value: unknown): string | undefined {
@@ -51,16 +40,14 @@ function assertUniqueStrings(values: string[], label: string): void {
 
 export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): Partial<Record<PrimitiveName, PrimitiveHandler>> {
   return {
-    set_state: (req, session) => deps.setState(session, req.payload ?? {}),
     talk_to_guide: (req) => deps.talkToGuide(String(req.payload?.message ?? "")),
     talk_to_goal_chat: (req) => {
       const goalTitle = asOptionalString(req.payload?.goalTitle);
       if (!goalTitle) throw new Error("talk_to_goal_chat requires goalTitle");
       return deps.talkToGoalChat(String(req.payload?.message ?? ""), goalTitle);
     },
-    send_coach_message: (req) => deps.sendCoachMessage(String(req.payload?.message ?? "")),
     brainstorm_desires_for_each_category: (req) => {
-      const itemsByCategory = (req.payload?.itemsByCategory as StatePatch) ?? {};
+      const itemsByCategory = (req.payload?.itemsByCategory as Record<string, unknown>) ?? {};
       const requestedItems = Object.values(itemsByCategory)
         .flatMap((rawItems) => Array.isArray(rawItems) ? rawItems.map((value) => String(value).trim()).filter((value) => value.length > 0) : []);
       assertUniqueStrings(requestedItems, "desire titles");
@@ -146,12 +133,6 @@ export function createWritePrimitiveHandlers(deps: WritePrimitiveDependencies): 
         uncompleted.push(taskText);
       }
       return { goalTitle, uncompleted };
-    },
-    complete_goal: (req) => deps.completeGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    reactivate_goal: (req) => deps.reactivateGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    archive_goal: (req) => deps.archiveGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    delete_goal: (req) => deps.deleteGoal(asOptionalString(req.payload?.goalTitle), asOptionalString(req.payload?.goalId)),
-    navigate: (req) => deps.navigate((req.payload?.route as KnownRouteId | undefined) ?? "goals"),
-    invoke_known_action: (req) => deps.invokeKnownAction(req.payload ?? {})
+    }
   };
 }

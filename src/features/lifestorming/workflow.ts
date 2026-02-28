@@ -1,10 +1,9 @@
 import type { BrowserContext, Locator, Page } from "playwright";
 import type { SearchRoot } from "../../platform/navigation.js";
 import { config } from "../../core/config.js";
-import { extractLifestormingCategory, extractLifestormingOverview, extractSensationPractice } from "../../platform/extractors.js";
-import { extractRouteParams, titleCase } from "../../platform/navigation.js";
+import { extractLifestormingOverview, extractSensationPractice } from "../../platform/extractors.js";
+import { extractRouteParams } from "../../platform/navigation.js";
 import { StateError } from "../../core/recovery.js";
-import { LIFESTORMING_CATEGORIES } from "./constants.js";
 import type { DesireCacheEntry } from "../../client/entityCache.js";
 
 export type LifestormingWorkflowDeps = {
@@ -170,58 +169,6 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       return { url: page.url(), ...result };
     },
 
-    async listLifestormingDesires() {
-      const overview = await this.readLifestormingOverview();
-      const bySection = new Map(overview.desiresBySection.map((section) => [section.section, section.items]));
-      return {
-        url: overview.url,
-        buckets: [
-          { category: "feel_it_out", items: bySection.get("feel_it_out") ?? [] },
-          { category: "start_a_goal", items: bySection.get("start_a_goal") ?? [] }
-        ],
-        snippet: overview.snippet
-      };
-    },
-
-    async readLifestormingCategory(category?: string) {
-      const page = deps.pageOrThrow();
-      const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-      const targetUrl = `${base}/lifestorming/desires-selection/${(category ? category : "category").toLowerCase()}`;
-      await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-      await deps.waitForPageTextNotContaining("Loading Desires...", 2500);
-      if (category) await deps.waitForDesiresCategory(category, 2500);
-      const text = await page.locator("body").innerText().catch(() => "");
-      const result = extractLifestormingCategory(text, new URL(page.url()).pathname);
-      const anchors = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
-          const href = (el as HTMLAnchorElement).href || "";
-          const match = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
-          return { text: (el.textContent || "").trim(), desireId: match?.[1] };
-        })
-      );
-      const normalizedCategory = result.category ? titleCase(result.category) : undefined;
-      for (const item of result.items) {
-        const linked = anchors.find((anchor) => anchor.text === item);
-        if (linked?.desireId) deps.cacheDesire({ desireId: linked.desireId, title: item, category: normalizedCategory });
-      }
-      return { url: page.url(), category: result.category, intro: result.intro, items: result.items, snippet: result.snippet };
-    },
-
-    async readLifestormingFull() {
-      const overview = await this.readLifestormingOverview();
-      const bySection = new Map(overview.desiresBySection.map((section) => [section.section, section.items]));
-      const categories = await Promise.all(LIFESTORMING_CATEGORIES.map((category) => this.readLifestormingCategoryInTemporaryPage(category)));
-      return {
-        overview,
-        buckets: [
-          { category: "feel_it_out", items: bySection.get("feel_it_out") ?? [] },
-          { category: "start_a_goal", items: bySection.get("start_a_goal") ?? [] }
-        ],
-        categories,
-        cachedDesires: Object.values(deps.entityDesires()).sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt))
-      };
-    },
-
     async readSensationPractice(desireId?: string, desireTitle?: string) {
       const page = deps.pageOrThrow();
       const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
@@ -292,31 +239,6 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       } finally {
         await page.close().catch(() => undefined);
       }
-    },
-
-    async readLifestormingCategoryInTemporaryPage(category: string): Promise<{ category?: string; intro?: string; items: string[] }> {
-      return this.withTemporaryPage(async (page) => {
-        const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-        const targetUrl = `${base}/lifestorming/desires-selection/${category.toLowerCase()}`;
-        await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-        await deps.waitForPageTextNotContaining("Loading Desires...", 2500, page);
-        await deps.waitForDesiresCategory(category, 2500, page);
-        const text = await page.locator("body").innerText().catch(() => "");
-        const result = extractLifestormingCategory(text, new URL(page.url()).pathname);
-        const anchors = await page.evaluate(() =>
-          Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
-            const href = (el as HTMLAnchorElement).href || "";
-            const match = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
-            return { text: (el.textContent || "").trim(), desireId: match?.[1] };
-          })
-        );
-        const normalizedCategory = result.category ? titleCase(result.category) : undefined;
-        for (const item of result.items) {
-          const linked = anchors.find((anchor) => anchor.text === item);
-          if (linked?.desireId) deps.cacheDesire({ desireId: linked.desireId, title: item, category: normalizedCategory });
-        }
-        return { category: result.category, intro: result.intro, items: result.items };
-      });
     },
 
     async readCachedDesires() {

@@ -165,7 +165,7 @@ async function ensureGoalCapacity(client, session, steps, slotsNeeded = 1) {
   const archivedTitles = [];
   while (activeCount + slotsNeeded > 10) {
     const safeGoalTitle = await findSafeGoalTitle(client, session);
-    const archiveRes = await client.execute({ id: `archive-capacity-${archivedTitles.length}`, name: "archive_goal", payload: { goalTitle: safeGoalTitle } }, session);
+    const archiveRes = await client.execute({ id: `archive-capacity-${archivedTitles.length}`, name: "update_goal", payload: { goalTitle: safeGoalTitle, status: "archived" } }, session);
     steps.push({ step: "archive_goal_for_capacity", ...summarize(archiveRes) });
     if (!archiveRes.ok) {
       throw new Error(archiveRes.error ?? `could not archive safe goal for capacity: ${safeGoalTitle}`);
@@ -243,28 +243,21 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
   if (!brainstormRes.ok) {
     return steps;
   }
-  const lifestormMeaning = await runStep(client, session, steps, {
-    id: "3m",
-    name: "read_lifestorming_category",
-    payload: { category: "meaning" }
+  const lifestormOverview = await runStep(client, session, steps, {
+    id: "3o",
+    name: "read_lifestorming_overview"
   });
-  const lifestormHealth = await runStep(client, session, steps, {
-    id: "3h",
-    name: "read_lifestorming_category",
-    payload: { category: "health" }
-  });
+  const visibleDesires = Array.isArray(lifestormOverview.result?.visibleDesires) ? lifestormOverview.result.visibleDesires : [];
   steps.push({
     step: "brainstorm_verify",
     id: "3v",
     ok:
-      Array.isArray(lifestormMeaning.result?.items) &&
-      lifestormMeaning.result.items.includes(brainstormMeaning) &&
-      Array.isArray(lifestormHealth.result?.items) &&
-      lifestormHealth.result.items.includes(brainstormHealth),
+      visibleDesires.includes(brainstormMeaning) &&
+      visibleDesires.includes(brainstormHealth),
     error: null,
     result: {
-      meaningFound: Array.isArray(lifestormMeaning.result?.items) ? lifestormMeaning.result.items.includes(brainstormMeaning) : false,
-      healthFound: Array.isArray(lifestormHealth.result?.items) ? lifestormHealth.result.items.includes(brainstormHealth) : false
+      meaningFound: visibleDesires.includes(brainstormMeaning),
+      healthFound: visibleDesires.includes(brainstormHealth)
     }
   });
 
@@ -372,7 +365,7 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
     return steps;
   }
   const goalChatReadA = await runStep(client, session, steps, { id: "7c", name: "read_goal_chat", payload: { goalTitle: chatGoalTitle } });
-  await runStep(client, session, steps, { id: "7d", name: "navigate", payload: { route: "goals" } });
+  await runStep(client, session, steps, { id: "7d", name: "read_goals_overview" });
   await runStep(client, session, steps, { id: "7e", name: "start_goal", payload: { goalTitle: chatGoalTitle } });
   const goalChatReadB = await runStep(client, session, steps, { id: "7f", name: "read_goal_chat", payload: { goalTitle: chatGoalTitle } });
   steps.push({
@@ -446,8 +439,8 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
     { id: "12", name: "complete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
     { id: "13", name: "uncomplete_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
     { id: "14", name: "remove_task", payload: { goalTitle: taskGoalTitle, taskText: workingTaskText } },
-    { id: "15", name: "complete_goal", payload: { goalTitle: lifecycleGoalTitle } },
-    { id: "16", name: "reactivate_goal", payload: { goalTitle: lifecycleGoalTitle } }
+    { id: "15", name: "update_goal", payload: { goalTitle: lifecycleGoalTitle, status: "completed" } },
+    { id: "16", name: "update_goal", payload: { goalTitle: lifecycleGoalTitle, status: "active" } }
   ];
 
   for (const step of tail) {
@@ -459,11 +452,11 @@ async function runRecoverableSequence(client, session, { goalTitle, task, messag
   }
 
   if (directGoalCreated) {
-    const archiveDirect = await client.execute({ id: "17", name: "archive_goal", payload: { goalTitle: directGoalTitle } }, session);
+    const archiveDirect = await client.execute({ id: "17", name: "update_goal", payload: { goalTitle: directGoalTitle, status: "archived" } }, session);
     steps.push({ step: "archive_direct_goal_cleanup", ...summarize(archiveDirect) });
   }
   if (lifestormGoalCreated) {
-    const archiveLifestorm = await client.execute({ id: "18", name: "archive_goal", payload: { goalTitle: lifestormGoalTitle } }, session);
+    const archiveLifestorm = await client.execute({ id: "18", name: "update_goal", payload: { goalTitle: lifestormGoalTitle, status: "archived" } }, session);
     steps.push({ step: "archive_lifestorm_goal_cleanup", ...summarize(archiveLifestorm) });
   }
 
@@ -583,10 +576,6 @@ async function inspectTaskDomForGoal(client, session, goalTitle, taskText) {
     { id: "inspect-open-goal", name: "start_goal", payload: { goalTitle } },
     session
   );
-  await client.execute(
-    { id: "inspect-open-tasks", name: "read_task_panel_snapshot", payload: { goalTitle } },
-    session
-  );
   const page = client.page ?? client["page"];
   if (!page) {
     throw new Error("page unavailable");
@@ -602,13 +591,6 @@ async function inspectTaskDomInGoalWorkspace(client, session, goalTitle, taskTex
   );
   if (!started.ok) {
     throw new Error(started.error ?? "could not open goal workspace");
-  }
-  const openedTasks = await client.execute(
-    { id: "inspect-open-tasks", name: "read_task_panel_snapshot", payload: { goalTitle } },
-    session
-  );
-  if (!openedTasks.ok) {
-    throw new Error(openedTasks.error ?? "could not open task panel");
   }
   const page = client.page ?? client["page"];
   if (!page) {
@@ -847,33 +829,27 @@ async function runClientMode(args) {
     }
 
     if (args.mode === "archive-by-id") {
-      const res = await client.execute({ id: "archive", name: "archive_goal", payload: { goalId: args.goalId ?? "" } }, session);
+      const res = await client.execute({ id: "archive", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "archived" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
     if (args.mode === "complete-by-id") {
-      const res = await client.execute({ id: "complete", name: "complete_goal", payload: { goalId: args.goalId ?? "" } }, session);
+      const res = await client.execute({ id: "complete", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "completed" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
     if (args.mode === "complete-goal") {
       await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "complete-goal", name: "complete_goal", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } }, session);
+      const res = await client.execute({ id: "complete-goal", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "completed" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
     if (args.mode === "reactivate-goal") {
       await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "reactivate-goal", name: "reactivate_goal", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } }, session);
-      console.log(JSON.stringify(summarize(res)));
-      return;
-    }
-
-    if (args.mode === "delete-by-id") {
-      const res = await client.execute({ id: "delete", name: "delete_goal", payload: { goalId: args.goalId ?? "" } }, session);
+      const res = await client.execute({ id: "reactivate-goal", name: "update_goal", payload: { goalTitle: args.goalTitle ?? "", status: "active" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -950,7 +926,7 @@ async function runClientMode(args) {
     if (args.mode === "read-goal") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "read-goal", name: "read_goal", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        { id: "read-goal", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -960,7 +936,7 @@ async function runClientMode(args) {
     if (args.mode === "read-goal-metadata") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "read-goal-metadata", name: "read_goal_metadata", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        { id: "read-goal-metadata", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -970,7 +946,7 @@ async function runClientMode(args) {
     if (args.mode === "read-goal-workspace") {
       await ensureLoggedIn(client, session);
       const res = await client.execute(
-        { id: "read-goal-workspace", name: "read_goal_workspace", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
+        { id: "read-goal-workspace", name: "read_goal_full", payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" } },
         session
       );
       console.log(JSON.stringify(summarize(res)));
@@ -1000,7 +976,7 @@ async function runClientMode(args) {
     }
 
     if (args.mode === "read-cached-goals") {
-      const res = await client.execute({ id: "read-cached-goals", name: "read_cached_goals" }, session);
+      const res = await client.execute({ id: "read-cached-goals", name: "list_goals", payload: { filter: "all" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -1016,7 +992,7 @@ async function runClientMode(args) {
       const res = await client.execute(
         {
           id: "read-task-panel-snapshot",
-          name: "read_task_panel_snapshot",
+          name: "read_goal_full",
           payload: { goalId: args.goalId ?? "", goalTitle: args.goalTitle ?? "" }
         },
         session
@@ -1027,7 +1003,7 @@ async function runClientMode(args) {
 
     if (args.mode === "survey-active-goal-task-states") {
       await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "survey-active-goal-task-states", name: "survey_active_goal_task_states" }, session);
+      const res = await client.execute({ id: "survey-active-goal-task-states", name: "list_goals", payload: { filter: "active" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -1041,24 +1017,18 @@ async function runClientMode(args) {
 
     if (args.mode === "list-desires") {
       await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "list-desires", name: "list_lifestorming_desires" }, session);
+      const res = await client.execute({ id: "list-desires", name: "read_lifestorming_overview" }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
     if (args.mode === "read-desire-category") {
-      await ensureLoggedIn(client, session);
-      const res = await client.execute(
-        { id: "read-desire-category", name: "read_lifestorming_category", payload: { category: args.message ?? "" } },
-        session
-      );
-      console.log(JSON.stringify(summarize(res)));
-      return;
+      throw new Error("read-desire-category removed; use read-sensation-practice or read-lifestorming-overview");
     }
 
     if (args.mode === "read-lifestorming-full") {
       await ensureLoggedIn(client, session);
-      const res = await client.execute({ id: "read-lifestorming-full", name: "read_lifestorming_full" }, session);
+      const res = await client.execute({ id: "read-lifestorming-full", name: "read_lifestorming_overview" }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
@@ -1159,13 +1129,6 @@ async function runClientMode(args) {
       if (!started.ok) {
         throw new Error(started.error ?? "could not open goal workspace");
       }
-      const openedTasks = await client.execute(
-        { id: "inspect-open-tasks", name: "read_task_panel_snapshot", payload: { goalTitle: goalTitleToInspect } },
-        session
-      );
-      if (!openedTasks.ok) {
-        throw new Error(openedTasks.error ?? "could not open task panel");
-      }
       const page = client.page ?? client["page"];
       if (!page) {
         throw new Error("page unavailable");
@@ -1216,10 +1179,6 @@ async function runClientMode(args) {
       await ensureLoggedIn(client, session);
       await client.execute(
         { id: "inspect-open-goal", name: "start_goal", payload: { goalTitle: goalTitleToInspect } },
-        session
-      );
-      await client.execute(
-        { id: "inspect-open-tasks", name: "read_task_panel_snapshot", payload: { goalTitle: goalTitleToInspect } },
         session
       );
       const page = client.page ?? client["page"];
@@ -1348,8 +1307,8 @@ async function runClientMode(args) {
       }
       const output = await capturePrimitiveNetwork(client, session, {
         id: "probe-archive-goal-network",
-        name: "archive_goal",
-        payload: { goalTitle: goalTitleToUse }
+        name: "update_goal",
+        payload: { goalTitle: goalTitleToUse, status: "archived" }
       });
       console.log(JSON.stringify(output));
       return;
@@ -1362,8 +1321,8 @@ async function runClientMode(args) {
       }
       const output = await capturePrimitiveNetwork(client, session, {
         id: "probe-complete-goal-network",
-        name: "complete_goal",
-        payload: { goalTitle: goalTitleToUse }
+        name: "update_goal",
+        payload: { goalTitle: goalTitleToUse, status: "completed" }
       });
       console.log(JSON.stringify(output));
       return;
@@ -1572,7 +1531,7 @@ async function runKeepOpenMode(args) {
         "  primitive <name> <json>      run one primitive with JSON payload",
         "  inspect-card <goal title>    inspect /goals card DOM for a goal",
         "  inspect-task <goal> | <task> inspect task DOM on /self-maximize",
-        "  examples: read_goals_overview, read_goal, read_page_sections, discover_links",
+        "  examples: read_goals_overview, read_goal_full, read_page_sections, discover_links",
         "  exit                         close browser and quit"
       ].join("\n") + "\n"
     );

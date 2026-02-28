@@ -1,6 +1,5 @@
 import type {
   InternalCachedDesiresResult,
-  KnownActionInvocation,
   InternalGoalChatResult,
   InternalGoalFullResult,
   InternalGoalListResult,
@@ -104,6 +103,7 @@ export type PublicApiResultMap = {
 };
 
 type PublicApiResult<Name extends PublicApiRequest["name"]> = PublicApiResultMap[Name];
+type InternalGoalListEntry = NonNullable<InternalGoalListResult["goals"]>[number];
 
 const publicActions: PublicAction[] = [
   { name: "get_state", mutating: false, description: "Expensive full-state sweep across goals, tasks, desires, and chats.", input: "{}", output: "{ goals: PublicGoalSummary[]; desires: PublicDesireSummary[] }" },
@@ -163,6 +163,11 @@ function normalizeTaskSummary(task: any): PublicTaskSummary {
     title: String(task?.text ?? task?.title ?? ""),
     status: task?.completed === true ? "completed" : task?.completed === false ? "pending" : "unknown"
   };
+}
+
+function normalizeChatHistory(messages: unknown[] | undefined, depth?: number): string[] {
+  const normalized = Array.isArray(messages) ? messages.map((value) => String(value)).reverse() : [];
+  return sliceDepth(normalized, depth);
 }
 
 function sliceDepth<T>(items: T[], depth: number | undefined): T[] {
@@ -247,7 +252,7 @@ export class PublicApi {
     }
   }
 
-  private async execInternal(session: SessionContext, name: string, payload?: PrimitivePayload | KnownActionInvocation): Promise<unknown> {
+  private async execInternal(session: SessionContext, name: string, payload?: PrimitivePayload): Promise<unknown> {
     const result = await this.client.execute({ id: `public-${name}-${Date.now()}`, name: name as any, payload }, session);
     if (!result.ok) throw new Error(result.error ?? `${name} failed`);
     return result.result;
@@ -289,21 +294,84 @@ export class PublicApi {
     return await this.execInternal(session, "read_sensation_practice", { desireTitle }) as InternalSensationPracticeResult;
   }
 
+  private async readLatestNewMessage(
+    beforePromise: Promise<string[]>,
+    action: () => Promise<unknown>,
+    afterPromise: () => Promise<string[]>
+  ): Promise<string> {
+    const before = await beforePromise.catch((): string[] => []);
+    await action();
+    const after = await afterPromise();
+    return after.find((entry) => !before.includes(entry)) ?? after.at(-1) ?? "";
+  }
+
+  private buildGoalSummaryBase(
+    goal: Pick<InternalGoalListEntry, "title" | "category" | "dueLabel" | "progressLabel" | "taskPreviewItems">,
+    status: PublicGoalStatus
+  ): PublicGoalSummary {
+    const title = String(goal?.title ?? "");
+    const dueDate = parseDueLabel(goal?.dueLabel);
+    return {
+      title,
+      category: requirePublicCategory(goal?.category, title),
+      dueDate: requirePublicDueDate(dueDate, title),
+      status,
+      completionPercent: parseCompletionPercent(goal?.progressLabel),
+      tasks: Array.isArray(goal?.taskPreviewItems)
+        ? goal.taskPreviewItems.map((taskTitle: string) => ({ title: taskTitle, status: "unknown" as const }))
+        : []
+    };
+  }
+
+  private async listGoalsByStatus(session: SessionContext, status: PublicGoalStatus): Promise<InternalGoalListEntry[]> {
+    const filter = status === "completed" ? "complete" : status;
+    const listed = await this.listGoalsInternal(session, filter);
+    return Array.isArray(listed.goals) ? listed.goals : [];
+  }
+
+  private async readDesireSummaries(session: SessionContext): Promise<{
+    feltOutTitles: Set<string>;
+    cachedByTitle: Map<string, { category?: PublicCategory }>;
+    allTitles: string[];
+  }> {
+    const overview = await this.readLifestormingOverviewInternal(session);
+    const cached = await this.readCachedDesiresInternal(session);
+    const feltOutTitles = new Set<string>();
+    const allTitles = new Set<string>();
+    for (const section of overview.desiresBySection ?? []) {
+      for (const item of section.items ?? []) {
+        allTitles.add(item);
+        if (section.section === "start_a_goal") feltOutTitles.add(item);
+      }
+    }
+    for (const item of cached.desires ?? []) {
+      if (item.title) allTitles.add(item.title);
+    }
+    const cachedByTitle = new Map<string, { category?: PublicCategory }>();
+    for (const item of cached.desires ?? []) {
+      if (!item.title) continue;
+      cachedByTitle.set(item.title.toLowerCase(), {
+        category: isPublicCategory(item.category) ? item.category : undefined
+      });
+    }
+    return { feltOutTitles, cachedByTitle, allTitles: [...allTitles].sort((a, b) => a.localeCompare(b)) };
+  }
+
   private async talkToGuide(session: SessionContext, message: string) {
-    const before = await this.readCoachMessages(session).catch((): string[] => []);
-    await this.execInternal(session, "talk_to_guide", { message });
-    const after = await this.readCoachMessages(session);
-    const response = after.find((entry) => !before.includes(entry)) ?? after.at(-1) ?? "";
+    const response = await this.readLatestNewMessage(
+      this.readCoachMessages(session),
+      () => this.execInternal(session, "talk_to_guide", { message }),
+      () => this.readCoachMessages(session)
+    );
     return { response };
   }
 
   private async talkToGoalChat(session: SessionContext, goalTitle: string, message: string) {
-    const before = await this.readGoalChatInternal(session, goalTitle).catch((): InternalGoalChatResult => ({ messages: [] }));
-    await this.execInternal(session, "talk_to_goal_chat", { goalTitle, message });
-    const after = await this.readGoalChatInternal(session, goalTitle);
-    const afterMessages = Array.isArray(after.messages) ? after.messages : [];
-    const beforeMessages = Array.isArray(before.messages) ? before.messages : [];
-    const response = afterMessages.find((entry) => !beforeMessages.includes(entry)) ?? afterMessages.at(-1) ?? "";
+    const response = await this.readLatestNewMessage(
+      this.readGoalChatInternal(session, goalTitle).then((result) => result.messages ?? []),
+      () => this.execInternal(session, "talk_to_goal_chat", { goalTitle, message }),
+      async () => (await this.readGoalChatInternal(session, goalTitle)).messages ?? []
+    );
     return { goalTitle, response };
   }
 
@@ -378,37 +446,24 @@ export class PublicApi {
     };
   }
 
-  private mapShallowGoal(goal: any, status: PublicGoalStatus): PublicGoalSummary {
-    const previewTasks = Array.isArray(goal?.taskPreviewItems)
-      ? goal.taskPreviewItems.map((title: string) => ({ title, status: "unknown" as const }))
-      : [];
-    const title = String(goal?.title ?? "");
-    const dueDate = parseDueLabel(goal?.dueLabel);
-    return {
-      title,
-      category: requirePublicCategory(goal?.category, title),
-      dueDate: requirePublicDueDate(dueDate, title),
-      status,
-      completionPercent: parseCompletionPercent(goal?.progressLabel),
-      tasks: previewTasks
-    };
-  }
-
-  private async mapDeepGoal(session: SessionContext, goal: any, status: PublicGoalStatus): Promise<PublicGoalSummary> {
+  private async mapDeepGoal(session: SessionContext, goal: InternalGoalListEntry, status: PublicGoalStatus): Promise<PublicGoalSummary> {
     const full = await this.readGoalFullInternal(session, goal.title);
     const details = await this.readGoalStatusDetailsInternal(session, goal.title);
-    const messages = Array.isArray(full.messages) ? full.messages.map((value) => String(value)).reverse() : [];
-    const title = String(goal?.title ?? full?.goalTitle ?? "");
-    const dueDate = parseDueLabel(full?.dueLabel ?? goal?.dueLabel);
     const summary: PublicGoalSummary = {
-      title,
-      category: requirePublicCategory(full?.category ?? goal?.category, title),
-      dueDate: requirePublicDueDate(dueDate, title),
-      status,
-      completionPercent: parseCompletionPercent(full?.progressLabel ?? goal?.progressLabel),
-      tasks: Array.isArray(full?.tasks) ? full.tasks.map(normalizeTaskSummary) : (this.mapShallowGoal(goal, status).tasks ?? [])
+      ...this.buildGoalSummaryBase(
+        {
+          title: String(full?.goalTitle ?? goal?.title ?? ""),
+          category: full?.category ?? goal?.category,
+          dueLabel: full?.dueLabel ?? goal?.dueLabel,
+          progressLabel: full?.progressLabel ?? goal?.progressLabel,
+          taskPreviewItems: goal?.taskPreviewItems
+        },
+        status
+      ),
+      tasks: Array.isArray(full?.tasks) ? full.tasks.map(normalizeTaskSummary) : this.buildGoalSummaryBase(goal, status).tasks
     };
-    if (messages.length > 0) summary.chatHistory = messages;
+    const chatHistory = normalizeChatHistory(full.messages);
+    if (chatHistory.length > 0) summary.chatHistory = chatHistory;
     const detailMap = new Map(
       (details.details ?? [])
         .map((detail) => [String(detail.key ?? "").toLowerCase(), detail])
@@ -432,32 +487,26 @@ export class PublicApi {
   private async resolveGoalStatusAndListEntry(
     session: SessionContext,
     goalTitle: string
-  ): Promise<{ status: PublicGoalStatus; goal: any }> {
-    const filters: Array<{ filter: "active" | "complete" | "archived"; status: PublicGoalStatus }> = [
-      { filter: "active", status: "active" },
-      { filter: "complete", status: "completed" },
-      { filter: "archived", status: "archived" }
-    ];
-    for (const candidate of filters) {
-      const listed = await this.listGoalsInternal(session, candidate.filter);
-      const goal = (listed.goals ?? []).find((item) => String(item?.title ?? "").toLowerCase() === goalTitle.toLowerCase());
+  ): Promise<{ status: PublicGoalStatus; goal: InternalGoalListEntry }> {
+    const statuses: PublicGoalStatus[] = ["active", "completed", "archived"];
+    for (const status of statuses) {
+      const listed = await this.listGoalsByStatus(session, status);
+      const goal = listed.find((item) => String(item?.title ?? "").toLowerCase() === goalTitle.toLowerCase());
       if (goal) {
-        return { status: candidate.status, goal };
+        return { status, goal };
       }
     }
     throw new Error(`goal not found: ${goalTitle}`);
   }
 
   private async getGoals(session: SessionContext, options: { status?: PublicGoalStatus; category?: PublicCategory; deep?: boolean }) {
-    const filter = options.status === "completed" ? "complete" : options.status ?? "active";
     const status = options.status ?? "active";
-    const listed = await this.listGoalsInternal(session, filter);
-    let goals = Array.isArray(listed.goals) ? listed.goals : [];
+    let goals = await this.listGoalsByStatus(session, status);
     if (options.category) {
       goals = goals.filter((goal) => goal?.category === options.category);
     }
     if (!options.deep) {
-      return { goals: goals.map((goal) => this.mapShallowGoal(goal, status)) };
+      return { goals: goals.map((goal) => this.buildGoalSummaryBase(goal, status)) };
     }
     const deepGoals: PublicGoalSummary[] = [];
     for (const goal of goals) {
@@ -482,37 +531,17 @@ export class PublicApi {
 
   private async getGoalChat(session: SessionContext, goalTitle: string, depth = 0) {
     const chat = await this.readGoalChatInternal(session, goalTitle);
-    const messages = sliceDepth((chat.messages ?? []).map((value) => String(value)), depth);
+    const messages = normalizeChatHistory(chat.messages, depth);
     return { goalTitle, messages };
   }
 
   private async getDesires(session: SessionContext, deep = false) {
-    const overview = await this.readLifestormingOverviewInternal(session);
-    const cached = await this.readCachedDesiresInternal(session);
-    const feltOut = new Set<string>();
-    const allTitles = new Set<string>();
-    for (const section of overview.desiresBySection ?? []) {
-      for (const item of section.items ?? []) {
-        allTitles.add(item);
-        if (section.section === "start_a_goal") feltOut.add(item);
-      }
-    }
-    for (const item of cached.desires ?? []) {
-      if (item.title) allTitles.add(item.title);
-    }
-    const cachedByTitle = new Map<string, { category?: PublicCategory }>();
-    for (const item of cached.desires ?? []) {
-      if (item.title) {
-        cachedByTitle.set(item.title.toLowerCase(), {
-          category: isPublicCategory(item.category) ? item.category : undefined
-        });
-      }
-    }
+    const { feltOutTitles, cachedByTitle, allTitles } = await this.readDesireSummaries(session);
     const desires: PublicDesireSummary[] = [];
     for (const title of allTitles) {
       const summary: PublicDesireSummary = {
         title,
-        feltOut: feltOut.has(title),
+        feltOut: feltOutTitles.has(title),
         category: cachedByTitle.get(title.toLowerCase())?.category
       };
       if (deep) {
@@ -527,12 +556,11 @@ export class PublicApi {
   }
 
   private async getDesire(session: SessionContext, desireTitle: string) {
-    const overview = await this.readLifestormingOverviewInternal(session);
-    const feltOut = (overview.desiresBySection ?? []).some((section) => section.section === "start_a_goal" && (section.items ?? []).includes(desireTitle));
+    const { feltOutTitles } = await this.readDesireSummaries(session);
     const detail = await this.readSensationPracticeInternal(session, desireTitle);
     const desire: PublicDesireSummary = {
       title: desireTitle,
-      feltOut,
+      feltOut: feltOutTitles.has(desireTitle),
       category: isPublicCategory(detail?.category) ? detail.category : undefined,
       sensationPracticeText: typeof detail?.noteText === "string" ? detail.noteText : undefined
     };

@@ -1,10 +1,8 @@
 export const primitiveNames = [
   "login",
   "get_state",
-  "set_state",
   "talk_to_guide",
   "talk_to_goal_chat",
-  "send_coach_message",
   "read_coach_messages",
   "brainstorm_desires_for_each_category",
   "feel_out_desires",
@@ -20,15 +18,9 @@ export const primitiveNames = [
   "discover_links",
   "list_goals",
   "discover_goals",
-  "read_goal",
-  "read_goal_metadata",
-  "read_goal_workspace",
   "read_goal_full",
   "read_goal_status_details",
-  "read_cached_goals",
   "read_cached_desires",
-  "read_task_panel_snapshot",
-  "survey_active_goal_task_states",
   "list_goal_tasks",
   "read_task_suggestions",
   "read_goal_chat",
@@ -37,22 +29,12 @@ export const primitiveNames = [
   "read_life_history_assessment",
   "read_big_five_assessment",
   "read_lifestorming_overview",
-  "list_lifestorming_desires",
-  "read_lifestorming_category",
-  "read_lifestorming_full",
   "read_sensation_practice",
   "start_goal",
   "add_tasks",
   "remove_task",
   "complete_task",
   "uncomplete_task",
-  "complete_goal",
-  "reactivate_goal",
-  "archive_goal",
-  "delete_goal",
-  "navigate",
-  "list_known_actions",
-  "invoke_known_action"
 ] as const;
 
 export type PrimitiveName = (typeof primitiveNames)[number];
@@ -84,7 +66,6 @@ export type PublicApiPayload = JsonMap;
 export type BridgePayload = JsonMap;
 export type StateSnapshot = JsonMap;
 export type StatePatch = JsonMap;
-export type KnownActionInvocation = JsonMap;
 
 export type PrimitiveRequest = {
   id: string;
@@ -328,70 +309,10 @@ export type DiscoverGoalIdsResult = {
   loadingVisible?: boolean;
 };
 
-export type InternalGoalReadResult = {
-  goalId?: string;
-  goalTitle?: string;
-  url?: string;
-  workspaceVisible?: boolean;
-  snippet?: string;
-  statusBlocks?: GoalStatusBlock[];
-};
-
-export type InternalGoalMetadataResult = {
-  goalId?: string;
-  goalTitle?: string;
-  url?: string;
-  workspaceVisible?: boolean;
-  category?: string;
-  dueLabel?: string;
-  progressLabel?: string;
-  snippet?: string;
-};
-
-export type InternalGoalWorkspaceResult = {
-  goalId?: string;
-  goalTitle?: string;
-  url?: string;
-  workspaceVisible?: boolean;
-  tabs?: string[];
-  currentGoal?: string;
-  snippet?: string;
-};
-
 export type InternalGoalSourceDocsResult = {
   desireDoc?: unknown;
   summaryDoc?: unknown;
   candidateDocs?: Array<{ path: string; result: unknown }>;
-};
-
-export type InternalCachedGoalsResult = {
-  goals?: Array<{
-    goalId?: string;
-    title?: string;
-    category?: string;
-    dueLabel?: string;
-    progressLabel?: string;
-    taskSummaryLabel?: string;
-    taskPreviewItems?: string[];
-    taskPanelState?: GoalTaskPanelState;
-    lastSeenAt?: string;
-  }>;
-};
-
-export type InternalTaskPanelSnapshotResult = {
-  goalId?: string;
-  goalTitle?: string;
-  url?: string;
-  taskPanelVisible?: boolean;
-  taskPanelText?: string;
-  nearbyTexts?: string[];
-  nearbyHtml?: string[];
-  snippet?: string;
-};
-
-export type SurveyActiveGoalTaskStatesResult = {
-  goals?: GoalSummary[];
-  counts?: { tasks_present: number; add_tasks: number; empty: number };
 };
 
 export type TaskSuggestionsResult = {
@@ -420,25 +341,4 @@ export type LevelCheckResult = {
   concepts?: string[];
   topics?: LevelCheckTopic[];
   snippet?: string;
-};
-
-export type LifestormingCategoryResult = {
-  url?: string;
-  category?: string;
-  intro?: string;
-  items?: string[];
-  snippet?: string;
-};
-
-export type LifestormingDesiresListResult = {
-  url?: string;
-  buckets?: Array<{ category: string; items: string[] }>;
-  snippet?: string;
-};
-
-export type LifestormingFullResult = {
-  overview?: InternalLifestormingOverviewResult;
-  buckets?: Array<{ category: string; items: string[] }>;
-  categories?: Array<LifestormingCategoryResult>;
-  cachedDesires?: InternalCachedDesireEntry[];
 };
