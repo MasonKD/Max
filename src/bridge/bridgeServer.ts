@@ -1,13 +1,13 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
 import { config } from "../core/config.js";
-import { SelfMaxPlaywrightClient } from "../client/selfmaxClient.js";
+import { SelfMaxPlaywrightClient } from "../client/index.js";
 import type { BridgeEnvelope, BusRole, SessionContext } from "../core/types.js";
 import { busRoles } from "../core/types.js";
 import { incomingBridgeEnvelopeSchema } from "../core/schemas.js";
 import type { IncomingBridgeEnvelope } from "../core/schemas.js";
 import { ZodError } from "zod";
-import { PublicApi } from "../api/publicApi.js";
+import { PublicApi } from "../api/index.js";
 
 type ClientCtx = {
   socket: WebSocket;

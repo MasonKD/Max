@@ -13,7 +13,7 @@ import type {
   PublicApiResponse,
   SessionContext
 } from "../core/types.js";
-import type { SelfMaxPlaywrightClient } from "../client/selfmaxClient.js";
+import type { SelfMaxPlaywrightClient } from "../client/index.js";
 
 type PublicTaskStatus = "pending" | "completed" | "unknown";
 export type PublicCategory = "Health" | "Work" | "Love" | "Family" | "Social" | "Fun" | "Dreams" | "Meaning";

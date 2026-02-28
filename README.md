@@ -27,6 +27,35 @@ This project provides a Playwright-driven integration layer so OpenClaw/Moltbot 
 
 Internal Playwright primitives still exist for local smoke/dev tooling, but they are private implementation details and are not part of the external contract.
 
+## Source Layout
+
+The source tree is organized by responsibility:
+
+- `src/core`
+  - shared config, schemas, types, recovery, and atomic execution
+- `src/platform`
+  - route catalog, selectors, navigation, DOM extractors, diagnostics
+- `src/features`
+  - `auth`
+  - `goals`
+  - `lifestorming`
+- `src/api`
+  - public API adapter
+  - private primitive handler wiring
+- `src/client`
+  - long-lived Playwright client and session/cache orchestration
+- `src/bridge`
+  - WebSocket server and external API exposure
+
+Barrel files are used at the feature and boundary folders where they improve imports:
+
+- `src/api/index.ts`
+- `src/bridge/index.ts`
+- `src/client/index.ts`
+- `src/features/auth/index.ts`
+- `src/features/goals/index.ts`
+- `src/features/lifestorming/index.ts`
+
 ## Run
 
 1. Install deps:
@@ -262,6 +291,7 @@ Update tasks example:
 - For production durability, replace storage primitives with explicit SelfMax UI actions that write/read from a durable in-app entity (notes/journal/custom field).
 - The external contract is the public API carried in WebSocket envelopes with `type: "api"`.
 - Internal primitives, diagnostics, navigation helpers, and operational controls are private implementation details.
+- The development smoke scripts exercise the private primitive layer directly and are not part of the external contract.
 - Canonical route/state/action definitions are documented in `docs/selfmax-route-state-action-spec.md`.
 - Canonical guidance language inventory is documented in `docs/selfmax-guidance-copy-inventory.md`.
 - Canonical integration runtime flow is documented in `docs/selfmax-technical-integration-flow.md`.
