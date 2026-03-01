@@ -8,6 +8,7 @@ import type { PrimitiveReadResult } from "../api/primitives-read.js";
 import type { PrimitiveWriteResult } from "../api/primitives-write.js";
 import { clickByText, resolveFirstVisible, tryClickByCss, tryClickByText } from "../platform/navigation.js";
 import { formatError } from "../core/recovery.js";
+import { setPageOwner, timeAction } from "../core/index.js";
 import { SessionGate } from "./sessionGate.js";
 import { createAuthSupport, createAuthWorkflow } from "../features/auth/index.js";
 import { createGoalsSupport, createGoalsWorkflow } from "../features/goals/index.js";
@@ -182,6 +183,8 @@ export class SelfMaxPlaywrightClient {
     this.context = await this.browser.newContext(contextOptions);
     this.workPage = await this.context.newPage();
     this.goalsPage = await this.context.newPage();
+    setPageOwner(this.workPage, "workPage");
+    setPageOwner(this.goalsPage, "goalsPage");
     this.page = this.workPage;
   }
 
@@ -201,13 +204,19 @@ export class SelfMaxPlaywrightClient {
     try {
       const result = await this.atomic.run(async () => {
         const previousPage = this.page;
-        this.page = await this.resolveOwnedPage(req.name);
+        const ownedPage = await this.resolveOwnedPage(req.name);
+        this.page = ownedPage;
         const handler = this.handlers[req.name];
         if (!handler) {
           throw new Error(`unsupported primitive: ${String(req.name)}`);
         }
         try {
-          return await handler(req, session);
+          return await timeAction(
+            "primitive",
+            req.name,
+            { requestId: req.id, sessionId: session.sessionId, userId: session.userId, pageOwner: this.describePageOwner(ownedPage) },
+            () => handler(req, session)
+          );
         } finally {
           this.page = previousPage;
         }
@@ -231,13 +240,19 @@ export class SelfMaxPlaywrightClient {
     try {
       const result = await this.atomic.run(async () => {
         const previousPage = this.page;
-        this.page = await this.resolveOwnedPage(req.name, true);
+        const ownedPage = await this.resolveOwnedPage(req.name, true);
+        this.page = ownedPage;
         const handler = this.handlers[req.name];
         if (!handler) {
           throw new Error(`unsupported primitive: ${String(req.name)}`);
         }
         try {
-          return await handler(req, session);
+          return await timeAction(
+            "primitive",
+            req.name,
+            { requestId: req.id, sessionId: session.sessionId, userId: session.userId, pageOwner: this.describePageOwner(ownedPage), mode: "peek" },
+            () => handler(req, session)
+          );
         } finally {
           this.page = previousPage;
         }
@@ -272,6 +287,7 @@ export class SelfMaxPlaywrightClient {
     if (!this.context) throw new Error("playwright client not initialized");
     if (!this.goalsPage || this.goalsPage.isClosed()) {
       this.goalsPage = await this.context.newPage();
+      setPageOwner(this.goalsPage, "goalsPage");
     }
     return this.goalsPage;
   }
@@ -280,6 +296,7 @@ export class SelfMaxPlaywrightClient {
     if (!this.context) throw new Error("playwright client not initialized");
     if (!this.workPage || this.workPage.isClosed()) {
       this.workPage = await this.context.newPage();
+      setPageOwner(this.workPage, "workPage");
     }
     return this.workPage;
   }
@@ -288,6 +305,7 @@ export class SelfMaxPlaywrightClient {
     if (!this.context) throw new Error("playwright client not initialized");
     if (!this.lifestormingPage || this.lifestormingPage.isClosed()) {
       this.lifestormingPage = await this.context.newPage();
+      setPageOwner(this.lifestormingPage, "lifestormingPage");
     }
     return this.lifestormingPage;
   }
@@ -296,14 +314,24 @@ export class SelfMaxPlaywrightClient {
     if (!this.context) throw new Error("playwright client not initialized");
     if (!this.goalWorkspacePage || this.goalWorkspacePage.isClosed()) {
       this.goalWorkspacePage = await this.context.newPage();
+      setPageOwner(this.goalWorkspacePage, "goalWorkspacePage");
     }
     return this.goalWorkspacePage;
+  }
+
+  private describePageOwner(page: Page): string {
+    if (page === this.workPage) return "workPage";
+    if (page === this.goalsPage) return "goalsPage";
+    if (page === this.lifestormingPage) return "lifestormingPage";
+    if (page === this.goalWorkspacePage) return "goalWorkspacePage";
+    return "unknown";
   }
 
   private async resolveOwnedPage(name: PrimitiveName, preferPeek = false): Promise<Page> {
     if ([
       "login",
       "get_state",
+      "create_goals_from_desires",
       "create_goal",
       "update_goal",
       "read_route_snapshot",

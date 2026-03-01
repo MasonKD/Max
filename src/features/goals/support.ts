@@ -9,6 +9,7 @@ import { StateError } from "../../core/recovery.js";
 import { waitForBoolean, waitForTruthy } from "../../core/postconditions.js";
 import { cssSelectors, selectors, textSelectors } from "../../platform/selectors.js";
 import type { GoalStatusBlock, TaskItem } from "../../core/types.js";
+import { navigatePage } from "../../core/index.js";
 
 export type GoalsSupportDeps = {
   pageOrThrow: () => Page;
@@ -375,7 +376,7 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
           const clicked = await this.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
           if (clicked && (await this.waitForGoalContext(goalTitle, 2000))) return;
         }
-        await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+        await navigatePage(page, `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }, { action: "openGoalContext:reset-goals" }).catch(() => undefined);
       }
       throw new Error(`could not open goal context for: ${goalTitle}`);
     },
@@ -910,14 +911,14 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       });
       if (!href) return false;
       const absolute = new URL(href, page.url()).toString();
-      await page.goto(absolute, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+      await navigatePage(page, absolute, { waitUntil: "domcontentloaded" }, { action: "openGoalContextById:absolute-link" }).catch(() => undefined);
       return true;
     },
 
     async openGoalContextById(goalId: string): Promise<void> {
       const page = deps.pageOrThrow();
       const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-      await page.goto(`${base}/self-maximize?goalId=${encodeURIComponent(goalId)}`, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, `${base}/self-maximize?goalId=${encodeURIComponent(goalId)}`, { waitUntil: "domcontentloaded" }, { action: "openGoalContextById:direct", goalId });
     },
 
     async listGoalIdsFromPage(): Promise<string[]> {

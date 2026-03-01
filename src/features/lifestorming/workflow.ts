@@ -5,6 +5,7 @@ import { extractLifestormingOverview, extractSensationPractice } from "../../pla
 import { extractRouteParams } from "../../platform/navigation.js";
 import { StateError } from "../../core/recovery.js";
 import type { DesireCacheEntry } from "../../client/entityCache.js";
+import { navigatePage } from "../../core/index.js";
 
 type LifestormingCategory = "Health" | "Work" | "Love" | "Family" | "Social" | "Fun" | "Dreams" | "Meaning";
 type CategoryItems = Partial<Record<LifestormingCategory, string[]>>;
@@ -135,9 +136,9 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       let added = 0;
       const categories = Object.keys(itemsByCategory) as LifestormingCategory[];
       for (const category of categories) {
-        await page.goto(`${base}/lifestorming/desires-selection/${categoryPathSegment(category)}`, {
+        await navigatePage(page, `${base}/lifestorming/desires-selection/${categoryPathSegment(category)}`, {
           waitUntil: "domcontentloaded"
-        });
+        }, { action: "brainstormDesiresForEachCategory", category });
         await deps.waitForPageTextNotContaining("Loading Desires...", 2500);
         await deps.waitForDesiresCategory(category, 2500);
         const rawItems = itemsByCategory[category];
@@ -160,7 +161,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       const desires = rawDesires.filter((entry) => entry.title.trim().length > 0);
       const processed: Array<{ title: string; notes: string }> = [];
       for (const desire of desires) {
-        await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/lifestorming`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/lifestorming`, { waitUntil: "domcontentloaded" }, { action: "feelOutDesires:open-root", desireTitle: desire.title });
         await deps.waitForPageTextNotContaining("Loading Lifestorming Page...", 2500);
         await page.waitForTimeout(500);
         await this.openDesireForViewing(desire.title);
@@ -188,7 +189,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
     async readLifestormingOverview() {
       const page = deps.pageOrThrow();
       const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-      await page.goto(`${base}/lifestorming`, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, `${base}/lifestorming`, { waitUntil: "domcontentloaded" }, { action: "readLifestormingOverview" });
       await deps.waitForPageTextNotContaining("Loading Lifestorming Page...", 2500);
       const result = extractLifestormingOverview(await page.locator("body").innerText().catch(() => ""));
       const rootLinks = await findVisibleDesireLinksOnRoot(page);
@@ -211,9 +212,9 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
       if (!desireId && desireTitle) desireId = deps.findDesireIdByTitle(desireTitle);
       if (desireId) {
-        await page.goto(`${base}/lifestorming/sensation-practice/${encodeURIComponent(desireId)}`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${base}/lifestorming/sensation-practice/${encodeURIComponent(desireId)}`, { waitUntil: "domcontentloaded" }, { action: "readSensationPractice:by-id", desireId });
       } else if (desireTitle) {
-        await page.goto(`${base}/lifestorming`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${base}/lifestorming`, { waitUntil: "domcontentloaded" }, { action: "readSensationPractice:open-root", desireTitle });
         await deps.waitForPageTextNotContaining("Loading Lifestorming Page...", 2500);
         await page.waitForTimeout(500);
         await this.openDesireForViewing(desireTitle);
@@ -247,14 +248,14 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
         const normalizedHref = new URL(directHref, page.url()).toString();
         const desireIdMatch = normalizedHref.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
         if (desireIdMatch?.[1]) tryCacheDesire({ desireId: desireIdMatch[1], title: desire });
-        await page.goto(normalizedHref, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, normalizedHref, { waitUntil: "domcontentloaded" }, { action: "openDesireForViewing:direct-href", desireTitle: desire });
         return;
       }
 
       const cachedCategory = findCachedDesireCategory(desire);
       if (cachedCategory) {
         const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
-        await page.goto(`${base}/lifestorming/desires-selection/${categoryPathSegment(cachedCategory)}`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${base}/lifestorming/desires-selection/${categoryPathSegment(cachedCategory)}`, { waitUntil: "domcontentloaded" }, { action: "openDesireForViewing:cached-category", desireTitle: desire, category: cachedCategory });
         await deps.waitForPageTextNotContaining("Loading Desires...", 2500);
         const rowInCategory = await deps.resolveRowByText(desire, false);
         if (rowInCategory) {

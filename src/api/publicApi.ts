@@ -13,7 +13,7 @@ import type {
   SessionContext
 } from "../core/types.js";
 import type { SelfMaxPlaywrightClient } from "../client/index.js";
-import { mapWithConcurrency } from "../core/index.js";
+import { mapWithConcurrency, timeAction } from "../core/index.js";
 import {
   isPublicCategory,
   normalizePublicCategory,
@@ -165,7 +165,12 @@ export class PublicApi {
     session: SessionContext
   ): Promise<PublicApiResponse<PublicApiResult<Name>>> {
     try {
-      const result = await this.handle(req, session);
+      const result = await timeAction(
+        "public_api",
+        req.name,
+        { requestId: req.id, sessionId: session.sessionId, userId: session.userId },
+        () => this.handle(req, session)
+      );
       return { id: req.id, ok: true, result };
     } catch (error) {
       return {

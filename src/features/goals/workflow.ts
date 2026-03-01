@@ -6,6 +6,7 @@ import { extractGoalsOverview, extractGoalSummariesFromText, dedupeGoalSummaries
 import { goalIdFromUrl, normalizeDateInput } from "../../platform/navigation.js";
 import { waitForBoolean } from "../../core/postconditions.js";
 import type { GoalCacheEntry } from "../../client/entityCache.js";
+import { navigatePage } from "../../core/index.js";
 
 type DesireGoalInput = Array<{
   title: string;
@@ -126,6 +127,62 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     }
   }
 
+  async function openCreateGoalFromDesire(desireTitle: string): Promise<void> {
+    const page = deps.ensurePage();
+    const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
+    await navigatePage(page, `${base}/lifestorming`, { waitUntil: "domcontentloaded" }, { action: "createGoalsFromDesires:open-lifestorming" });
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      const text = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
+      if (!/Loading Lifestorming Page/i.test(text)) break;
+      await page.waitForTimeout(200);
+    }
+
+    const anchor = page.getByText(desireTitle, { exact: false }).first();
+    if ((await anchor.count()) === 0) {
+      throw new Error(`could not locate desire in lifestorming: ${desireTitle}`);
+    }
+
+    for (let depth = 1; depth <= 6; depth += 1) {
+      const row = anchor.locator(`xpath=ancestor::*[self::div or self::li or self::article or self::section][${depth}]`);
+      if ((await row.count()) === 0) continue;
+      const text = ((await row.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      if (!text.includes(desireTitle) || !/ADD TO GOALS/i.test(text)) continue;
+      const clicked = await deps.tryClickByText(page, ["ADD TO GOALS"], row);
+      if (!clicked) continue;
+      const panelDeadline = Date.now() + 3000;
+      while (Date.now() < panelDeadline) {
+        const panel = await deps.resolveCreateGoalPanel();
+        if (panel) return;
+        if (/\/goals(\?|$)/.test(page.url())) {
+          const dueInput = page.locator('input[type="date"]').first();
+          if ((await dueInput.count()) > 0 && (await dueInput.isVisible().catch(() => false))) return;
+        }
+        await page.waitForTimeout(200);
+      }
+      break;
+    }
+
+    throw new Error(`could not open create-goal flow from Step 3 for desire: ${desireTitle}`);
+  }
+
+  async function finalizeCreatedGoal(goalTitle: string): Promise<void> {
+    await deps.openGoalContext(goalTitle);
+    await deps.waitForGoalDataLoaded();
+    const page = deps.pageOrThrow();
+    const goalId = goalIdFromUrl(page.url());
+    const snapshot = await deps.captureCurrentGoalWorkspace().catch(() => null);
+    if (goalId) {
+      deps.cacheGoal({
+        goalId,
+        title: goalTitle,
+        category: snapshot?.category,
+        dueLabel: snapshot?.dueLabel,
+        progressLabel: snapshot?.progressLabel
+      });
+    }
+  }
+
   async function readGoalTaskSummaryFromGoals(goalTitle?: string): Promise<{
     title: string;
     taskPanelState: "tasks_present" | "add_tasks" | "empty";
@@ -134,7 +191,7 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
   } | null> {
     if (!goalTitle) return null;
     return deps.withTemporaryPage(async (page) => {
-      await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }, { action: "readGoalTaskSummaryFromGoals" });
       const deadline = Date.now() + 3000;
       let text = "";
       while (Date.now() < deadline) {
@@ -359,8 +416,25 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
               : hasExplicitAddTasks
                 ? "add_tasks"
                 : "empty"
-          });
-        }
+    });
+  }
+
+  async function finalizeCreatedGoal(goalTitle: string): Promise<void> {
+    await deps.openGoalContext(goalTitle);
+    await deps.waitForGoalDataLoaded();
+    const page = deps.pageOrThrow();
+    const goalId = goalIdFromUrl(page.url());
+    const snapshot = await deps.captureCurrentGoalWorkspace().catch(() => null);
+    if (goalId) {
+      deps.cacheGoal({
+        goalId,
+        title: goalTitle,
+        category: snapshot?.category,
+        dueLabel: snapshot?.dueLabel,
+        progressLabel: snapshot?.progressLabel
+      });
+    }
+  }
 
         return extracted;
       });
@@ -711,17 +785,24 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         }
       }
       while (Date.now() < deadline) {
-        if (await deps.isGoalContextOpen(input.title)) return { created: true, title: input.title };
+        if (await deps.isGoalContextOpen(input.title)) {
+          await finalizeCreatedGoal(input.title).catch(() => undefined);
+          return { created: true, title: input.title };
+        }
         await deps.ensureOnGoals();
         const activeAfter = await deps.readGoalCount("Active");
         if (activeBefore !== null && activeAfter !== null && activeAfter > activeBefore) {
           const activeGoals = await createGoalsWorkflowInstance.listGoals("active").catch(() => null);
           if (activeGoals?.goals?.some((goal) => goal.title === input.title)) {
+            await finalizeCreatedGoal(input.title);
             return { created: true, title: input.title };
           }
         }
         const listed = await createGoalsWorkflowInstance.listGoals("active").catch(() => null);
-        if (listed?.goals?.some((goal) => goal.title === input.title)) return { created: true, title: input.title };
+        if (listed?.goals?.some((goal) => goal.title === input.title)) {
+          await finalizeCreatedGoal(input.title);
+          return { created: true, title: input.title };
+        }
         await page.waitForTimeout(300);
       }
       const snippet = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ").slice(0, 500);
@@ -747,7 +828,53 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
           throw new Error(`create_goals_from_desires requires goalCategory or cached desire category for "${desire.lookupTitle}"`);
         }
         if (!desire.dueDate) throw new Error(`create_goals_from_desires requires dueDate for "${desire.lookupTitle}"`);
-        await this.createGoal({ title: desire.goalTitle, category, dueDate: desire.dueDate });
+        await assertGoalTitleAvailable(desire.goalTitle);
+        await openCreateGoalFromDesire(desire.lookupTitle);
+        const page = deps.ensurePage();
+        const form = await deps.resolveCreateGoalPanel();
+        const titleField = await deps.resolveGoalTitleInput(form ?? undefined);
+        const existingTitle = (await titleField.inputValue().catch(() => "")).trim();
+        if (!existingTitle || normalizeKey(existingTitle) !== normalizeKey(desire.goalTitle)) {
+          await titleField.fill(desire.goalTitle);
+        }
+        if (desire.goalCategory && normalizeKey(desire.goalCategory) !== normalizeKey(category)) {
+          const categorySet = await deps.selectCreateGoalCategory(desire.goalCategory);
+          if (!categorySet) throw new Error(`could not select create_goals_from_desires override category: ${desire.goalCategory}`);
+        }
+        const due = (form ?? page).locator('input[type="date"]').first();
+        const normalized = normalizeDateInput(desire.dueDate);
+        if (!normalized) throw new Error(`invalid create_goals_from_desires dueDate: ${desire.dueDate}`);
+        if ((await due.count()) > 0) {
+          await due.fill(normalized);
+        } else {
+          throw new Error("could not locate create_goals_from_desires due date input");
+        }
+        let submitted = false;
+        const createBtn = page.getByRole("button", { name: /^create goal$/i }).first();
+        if ((await createBtn.count()) > 0 && (await createBtn.isVisible().catch(() => false))) {
+          try {
+            await createBtn.click({ timeout: 2000 });
+            submitted = true;
+          } catch {
+            submitted = false;
+          }
+        }
+        if (!submitted) submitted = await deps.tryClickByText(form ?? page, ["Create Goal", "Create", "Save", "Add Goal", "Done"]);
+        if (!submitted) await titleField.press("Enter");
+        const deadline = Date.now() + 4000;
+        while (Date.now() < deadline) {
+          if (await deps.isGoalContextOpen(desire.goalTitle)) {
+            await finalizeCreatedGoal(desire.goalTitle).catch(() => undefined);
+            break;
+          }
+          await deps.ensureOnGoals();
+          const listed = await createGoalsWorkflowInstance.listGoals("active").catch(() => null);
+          if (listed?.goals?.some((goal) => goal.title === desire.goalTitle)) {
+            await finalizeCreatedGoal(desire.goalTitle);
+            break;
+          }
+          await page.waitForTimeout(300);
+        }
         created.push(desire.goalTitle);
       }
       return { created };
@@ -845,7 +972,7 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
           await deps.openGoalContextById(id);
           if (await deps.waitForGoalContext(goalTitle, 1500)) return { started: true, goalTitle, goalId: id };
         }
-        await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+        await navigatePage(page, `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }, { action: "startGoal:reset-goals" }).catch(() => undefined);
       }
       throw new Error(`could not execute goal action START/Start/Open/View for goal: ${goalTitle}`);
     },

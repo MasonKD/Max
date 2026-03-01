@@ -76,6 +76,40 @@ cp .env.example .env
 npm run dev
 ```
 
+## Logging
+
+Structured logging uses `pino`.
+
+Environment flags:
+
+- `LOG_LEVEL`
+  - default: `info`
+- `LOG_PRETTY`
+  - default: `false`
+  - set to `true` for local pretty-printed logs
+- `LOG_TIMINGS`
+  - default: `true`
+  - controls duration logging on successful actions
+
+Current instrumentation:
+
+- public API calls
+- internal primitive execution
+- Playwright `page.goto(...)` navigation events
+
+Logged metadata includes:
+
+- action name
+- kind: `public_api` | `primitive` | `navigation`
+- request/session ids when available
+- page owner:
+  - `workPage`
+  - `goalsPage`
+  - `lifestormingPage`
+  - `goalWorkspacePage`
+- duration in ms
+- structured error context on failure
+
 ## Smoke tests
 
 Build first:

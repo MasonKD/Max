@@ -75,7 +75,16 @@ const EnvSchema = z.object({
   LOGIN_SUBMIT_SELECTOR: z.string().default('button[type="submit"]'),
   COACH_INPUT_SELECTOR: z.string().default("textarea"),
   COACH_SEND_SELECTOR: z.string().default('button[type="submit"]'),
-  COACH_MESSAGE_SELECTOR: z.string().default('[data-role="coach-message"]')
+  COACH_MESSAGE_SELECTOR: z.string().default('[data-role="coach-message"]'),
+  LOG_LEVEL: z.string().default("info"),
+  LOG_PRETTY: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
+  LOG_TIMINGS: z
+    .string()
+    .optional()
+    .transform((v) => v !== "false")
 });
 
 export type AppConfig = z.infer<typeof EnvSchema>;

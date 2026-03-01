@@ -8,6 +8,7 @@ import { readRouteSnapshotDiagnostic, readPageSectionsDiagnostic, discoverLinksD
 import { knownRoutes, type KnownRouteId } from "../../platform/catalog.js";
 import { splitVisibleLines } from "../../platform/extractors.js";
 import { extractAssessmentQuestionState, extractLevelCheck, extractUnderstandOverview } from "../../platform/extractors.js";
+import { navigatePage } from "../../core/index.js";
 
 export type AuthWorkflowDeps = {
   ensurePage: () => Page;
@@ -56,7 +57,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       const goalsUrl = `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`;
       let lastError: Error | null = null;
 
-      await page.goto(goalsUrl, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+      await navigatePage(page, goalsUrl, { waitUntil: "domcontentloaded" }, { action: "login:initial-goals" }).catch(() => undefined);
       if (await deps.isGoalsWorkspaceVisible()) {
         deps.sessionGate.markReady();
         await deps.persistAuthState();
@@ -65,7 +66,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          await page.goto(authUrl, { waitUntil: "domcontentloaded" });
+          await navigatePage(page, authUrl, { waitUntil: "domcontentloaded" }, { action: "login:auth" });
 
           const emailInput = await deps.resolveFirstVisible(page, [
             config.LOGIN_EMAIL_SELECTOR,
@@ -116,7 +117,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
 
           let reachedGoals = false;
           for (let i = 0; i < 2; i += 1) {
-            await page.goto(goalsUrl, { waitUntil: "domcontentloaded" }).catch(() => undefined);
+            await navigatePage(page, goalsUrl, { waitUntil: "domcontentloaded" }, { action: "login:goals-retry" }).catch(() => undefined);
             try {
               await deps.ensureGoalsWorkspaceVisible();
               reachedGoals = true;
@@ -291,13 +292,13 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
     }> {
       const page = deps.pageOrThrow();
       if (explicitUrl) {
-        await page.goto(assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" });
+        await navigatePage(page, assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" }, { action: "navigateForRead:explicit" });
       } else if (route && route in knownRoutes) {
         await this.navigate(route as KnownRouteId);
       } else if (route) {
         const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
         const path = route.startsWith("/") ? route : `/${route}`;
-        await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${base}${path}`, { waitUntil: "domcontentloaded" }, { action: "navigateForRead:known-route", route });
       }
       const onGoals = /\/goals(\?|$)/.test(page.url());
       return readRouteSnapshotDiagnostic(page, onGoals ? await this.readAuthState() : undefined);
@@ -332,21 +333,21 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
 
     async readLevelCheck() {
       const page = deps.pageOrThrow();
-      await page.goto(knownRoutes.level_check, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, knownRoutes.level_check, { waitUntil: "domcontentloaded" }, { action: "readLevelCheck" });
       const text = await page.locator("body").innerText().catch(() => "");
       return { url: page.url(), routeId: "level_check", ...extractLevelCheck(text) };
     },
 
     async readLifeHistoryAssessment() {
       const page = deps.pageOrThrow();
-      await page.goto(knownRoutes.assessment_life_history, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, knownRoutes.assessment_life_history, { waitUntil: "domcontentloaded" }, { action: "readLifeHistoryAssessment" });
       const text = await page.locator("body").innerText().catch(() => "");
       return { url: page.url(), routeId: "assessment_life_history", ...extractAssessmentQuestionState(text) };
     },
 
     async readBigFiveAssessment() {
       const page = deps.pageOrThrow();
-      await page.goto(knownRoutes.assessment_big_five, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, knownRoutes.assessment_big_five, { waitUntil: "domcontentloaded" }, { action: "readBigFiveAssessment" });
       const deadline = Date.now() + 4000;
       while (Date.now() < deadline) {
         const text = await page.locator("body").innerText().catch(() => "");
@@ -365,14 +366,14 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       if (!url) {
         throw new Error(`unknown route: ${route}`);
       }
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, url, { waitUntil: "domcontentloaded" }, { action: "readUnderstandOverview" });
       return { route, url: page.url() };
     },
 
     async navigateForRead(route?: string, explicitUrl?: string): Promise<void> {
       const page = deps.pageOrThrow();
       if (explicitUrl) {
-        await page.goto(assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" });
+        await navigatePage(page, assertAllowedSelfMaxUrl(explicitUrl), { waitUntil: "domcontentloaded" }, { action: "navigateToKnownRoute:explicit" });
         return;
       }
       if (route && route in knownRoutes) {
@@ -382,7 +383,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       if (route) {
         const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
         const path = route.startsWith("/") ? route : `/${route}`;
-        await page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
+        await navigatePage(page, `${base}${path}`, { waitUntil: "domcontentloaded" }, { action: "navigateToKnownRoute", route });
       }
     },
 
@@ -394,7 +395,7 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
         }
         return;
       }
-      await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" });
+      await navigatePage(page, `${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }, { action: "ensureOnGoals" });
       await deps.ensureGoalsWorkspaceVisible();
       if (!deps.sessionGate.isReady()) {
         deps.sessionGate.markReady();
