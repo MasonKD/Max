@@ -1,4 +1,4 @@
-import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { chromium, type Browser, type BrowserContext, type Locator, type Page } from "playwright";
 import { existsSync } from "node:fs";
 import { config } from "../core/config.js";
 import { AtomicExecutor } from "../core/atomic.js";
@@ -12,12 +12,16 @@ import { SessionGate } from "./sessionGate.js";
 import { createAuthSupport, createAuthWorkflow } from "../features/auth/index.js";
 import { createGoalsSupport, createGoalsWorkflow } from "../features/goals/index.js";
 import { createLifestormingSupport, createLifestormingWorkflow } from "../features/lifestorming/index.js";
-import { createSessionEntityCache, cacheGoal, cacheDesire, findGoalIdByTitle, findDesireIdByTitle, type SessionEntityCache } from "./entityCache.js";
+import { createSessionEntityCache, cacheGoal, cacheDesire, findGoalIdByTitle, findDesireByTitle, findDesireIdByTitle, type SessionEntityCache } from "./entityCache.js";
 
 export class SelfMaxPlaywrightClient {
   private browser?: Browser;
   private context?: BrowserContext;
   private page?: Page;
+  private workPage?: Page;
+  private goalsPage?: Page;
+  private lifestormingPage?: Page;
+  private goalWorkspacePage?: Page;
   private readonly atomic = new AtomicExecutor();
   private readonly entityCache: SessionEntityCache = createSessionEntityCache();
   private readonly sessionGate = new SessionGate();
@@ -79,6 +83,7 @@ export class SelfMaxPlaywrightClient {
     tryClickStartInGoalsList: () => this.goalsSupport.tryClickStartInGoalsList(),
     tryClickGoalCardAction: (goalTitle: string, actionTexts: string[]) => this.goalsSupport.tryClickGoalCardAction(goalTitle, actionTexts),
     resolveTaskInput: () => this.goalsSupport.resolveTaskInput(),
+    submitTaskInput: (field: Locator) => this.goalsSupport.submitTaskInput(field),
     resolveTaskRow: (taskText: string) => this.goalsSupport.resolveTaskRow(taskText),
     resolveTaskRowWithinPanel: (taskText: string) => this.goalsSupport.resolveTaskRowWithinPanel(taskText),
     readVisibleTaskItems: () => this.goalsSupport.readVisibleTaskItems(),
@@ -100,12 +105,8 @@ export class SelfMaxPlaywrightClient {
     entityGoals: () => this.entityCache.goalsById,
     isGoalContextOpen: (goalTitle?: string) => this.goalsSupport.isGoalContextOpen(goalTitle),
     resolveDesireCategory: async (desireTitle: string) => {
-      const normalized = desireTitle.trim().toLowerCase();
-      for (const entry of Object.values(this.entityCache.desiresById)) {
-        if (entry.title?.trim().toLowerCase() === normalized && entry.category?.trim()) {
-          return entry.category;
-        }
-      }
+      const cached = findDesireByTitle(this.entityCache, desireTitle);
+      if (cached?.category?.trim()) return cached.category;
       const result = await this.lifestormingWorkflow.readSensationPractice(undefined, desireTitle).catch(() => null);
       return result?.category?.trim() ? result.category : undefined;
     },
@@ -113,6 +114,7 @@ export class SelfMaxPlaywrightClient {
     formatGoalDueLabel: (input: string) => this.goalsSupport.formatGoalDueLabel(input),
     waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => this.goalsSupport.waitForGoalDueLabel(goalTitle, expectedLabel, timeoutMs),
     openGoalEditPanel: () => this.goalsSupport.openGoalEditPanel(),
+    openGoalStatusMenu: () => this.goalsSupport.openGoalStatusMenu(),
     clickGoalStatusAction: (status: "active" | "completed" | "archived") => this.goalsSupport.clickGoalStatusAction(status)
   });
   private readonly lifestormingWorkflow = createLifestormingWorkflow({
@@ -178,11 +180,19 @@ export class SelfMaxPlaywrightClient {
       ? { storageState: config.SELFMAX_STORAGE_STATE_PATH }
       : undefined;
     this.context = await this.browser.newContext(contextOptions);
-    this.page = await this.context.newPage();
+    this.workPage = await this.context.newPage();
+    this.goalsPage = await this.context.newPage();
+    this.page = this.workPage;
   }
 
   async close(): Promise<void> {
     this.sessionGate.clear();
+    const pages = [this.workPage, this.goalsPage, this.lifestormingPage, this.goalWorkspacePage].filter(
+      (page, index, list): page is Page => Boolean(page) && list.indexOf(page) === index
+    );
+    for (const page of pages) {
+      await page.close().catch(() => undefined);
+    }
     await this.context?.close();
     await this.browser?.close();
   }
@@ -190,11 +200,47 @@ export class SelfMaxPlaywrightClient {
   async execute(req: PrimitiveRequest, session: SessionContext): Promise<PrimitiveResponseOf<PrimitiveReadResult | PrimitiveWriteResult>> {
     try {
       const result = await this.atomic.run(async () => {
+        const previousPage = this.page;
+        this.page = await this.resolveOwnedPage(req.name);
         const handler = this.handlers[req.name];
         if (!handler) {
           throw new Error(`unsupported primitive: ${String(req.name)}`);
         }
-        return handler(req, session);
+        try {
+          return await handler(req, session);
+        } finally {
+          this.page = previousPage;
+        }
+      });
+
+      return {
+        id: req.id,
+        ok: true,
+        result
+      };
+    } catch (error) {
+      return {
+        id: req.id,
+        ok: false,
+        error: formatError(error)
+      };
+    }
+  }
+
+  async executeInTemporaryPage(req: PrimitiveRequest, session: SessionContext): Promise<PrimitiveResponseOf<PrimitiveReadResult | PrimitiveWriteResult>> {
+    try {
+      const result = await this.atomic.run(async () => {
+        const previousPage = this.page;
+        this.page = await this.resolveOwnedPage(req.name, true);
+        const handler = this.handlers[req.name];
+        if (!handler) {
+          throw new Error(`unsupported primitive: ${String(req.name)}`);
+        }
+        try {
+          return await handler(req, session);
+        } finally {
+          this.page = previousPage;
+        }
       });
 
       return {
@@ -220,6 +266,84 @@ export class SelfMaxPlaywrightClient {
 
   private pageOrThrow(): Page {
     return this.ensurePage();
+  }
+
+  private async ensureGoalsPage(): Promise<Page> {
+    if (!this.context) throw new Error("playwright client not initialized");
+    if (!this.goalsPage || this.goalsPage.isClosed()) {
+      this.goalsPage = await this.context.newPage();
+    }
+    return this.goalsPage;
+  }
+
+  private async ensureWorkPage(): Promise<Page> {
+    if (!this.context) throw new Error("playwright client not initialized");
+    if (!this.workPage || this.workPage.isClosed()) {
+      this.workPage = await this.context.newPage();
+    }
+    return this.workPage;
+  }
+
+  private async ensureLifestormingPage(): Promise<Page> {
+    if (!this.context) throw new Error("playwright client not initialized");
+    if (!this.lifestormingPage || this.lifestormingPage.isClosed()) {
+      this.lifestormingPage = await this.context.newPage();
+    }
+    return this.lifestormingPage;
+  }
+
+  private async ensureGoalWorkspacePage(): Promise<Page> {
+    if (!this.context) throw new Error("playwright client not initialized");
+    if (!this.goalWorkspacePage || this.goalWorkspacePage.isClosed()) {
+      this.goalWorkspacePage = await this.context.newPage();
+    }
+    return this.goalWorkspacePage;
+  }
+
+  private async resolveOwnedPage(name: PrimitiveName, preferPeek = false): Promise<Page> {
+    if ([
+      "login",
+      "get_state",
+      "create_goal",
+      "update_goal",
+      "read_route_snapshot",
+      "read_page_sections",
+      "discover_links",
+      "read_understand_overview",
+      "read_level_check",
+      "read_life_history_assessment",
+      "read_big_five_assessment"
+    ].includes(name)) {
+      return this.ensureWorkPage();
+    }
+
+    if ([
+      "brainstorm_desires_for_each_category",
+      "feel_out_desires",
+      "read_lifestorming_overview",
+      "read_cached_desires",
+      "read_sensation_practice"
+    ].includes(name)) {
+      return this.ensureLifestormingPage();
+    }
+
+    if ([
+      "talk_to_goal_chat",
+      "read_goal_full",
+      "read_goal_status_details",
+      "list_goal_tasks",
+      "read_task_suggestions",
+      "read_goal_chat",
+      "start_goal",
+      "add_tasks",
+      "remove_task",
+      "complete_task",
+      "uncomplete_task"
+    ].includes(name)) {
+      return this.ensureGoalWorkspacePage();
+    }
+
+    return this.ensureGoalsPage();
   }
 
 }

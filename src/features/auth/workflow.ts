@@ -82,11 +82,15 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
           const exactSignIn = page.getByRole("button", { name: /^sign in$/i }).first();
           let submitted = false;
           if ((await exactSignIn.count()) > 0 && (await exactSignIn.isVisible().catch(() => false))) {
-            await exactSignIn.click({ timeout: 1500 });
+            await exactSignIn.click({ timeout: 1500, force: true }).catch(() => undefined);
             submitted = true;
           }
           if (!submitted) {
             submitted = await deps.tryClickByCss(page, [config.LOGIN_SUBMIT_SELECTOR, ...cssSelectors(selectors.auth.submitButtons)]);
+          }
+          if (!submitted) {
+            await passwordInput.press("Enter").catch(() => undefined);
+            submitted = true;
           }
           if (!submitted) {
             throw new AuthError("could not submit login form", {
@@ -171,9 +175,14 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       }
       const input = await deps.resolveChatInput();
       await input.fill(message);
-      const sent = await deps.tryClickByText(deps.pageOrThrow(), ["Send", "GO", "submit"], input.locator("xpath=ancestor::*[self::form or self::div][1]"));
+      let sent = await deps.tryClickByText(deps.pageOrThrow(), ["Send", "GO", "submit"], input.locator("xpath=ancestor::*[self::form or self::div][1]"));
       if (!sent) {
-        await input.press("Meta+Enter");
+        await input.press("Enter").catch(() => undefined);
+        sent = true;
+      }
+      if (!sent) {
+        await input.press("Meta+Enter").catch(() => undefined);
+        sent = true;
       }
       return { sent: true };
     },
@@ -182,32 +191,70 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
       const page = deps.ensurePage();
       const byConfiguredSelector = page.locator(config.COACH_MESSAGE_SELECTOR);
       if ((await byConfiguredSelector.count()) > 0) {
-        return byConfiguredSelector
+        const configuredMessages = await byConfiguredSelector
           .allTextContents()
           .then((messages) => messages.map((m) => m.trim()).filter((m) => m.length > 0));
+        if (configuredMessages.length > 0) return configuredMessages;
       }
 
       const generic = page.locator('[class*="message"], [data-role*="message"], [data-testid*="message"]');
-      if ((await generic.count()) === 0) {
-        const bodyText = await page.locator("body").innerText().catch(() => "");
-        const lines = splitVisibleLines(bodyText);
-        const idx = lines.findIndex((line) => /Type your message/i.test(line));
-        if (idx > 0) {
-          return lines
-            .slice(Math.max(0, idx - 16), idx)
-            .filter(
-              (line) =>
-                line.length > 6 &&
-                !/SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|Help|More|WHAT DO YOU DESIRE TODAY\?|SELF-MAX GUIDE|GOAL CATEGORIES|YOUR GOALS|SHOW GOALS:|NEW GOAL|LIFESTORMING|Health|Work|Love|Family|Social|Fun|Dreams|Meaning|Active|Complete|Archived|All/i.test(
-                  line
-                )
-            );
-        }
-        return [];
+      if ((await generic.count()) > 0) {
+        const messages = await generic.allTextContents();
+        const normalized = messages.map((m) => m.trim()).filter((m) => m.length > 0);
+        if (normalized.length > 0) return normalized;
       }
 
-      const messages = await generic.allTextContents();
-      return messages.map((m) => m.trim()).filter((m) => m.length > 0);
+      const guideHeading = page.getByText(/^SELF-MAX GUIDE$/i).first();
+      if ((await guideHeading.count()) > 0) {
+        const guideComposer = page.locator('textarea[placeholder="Type your message..."], [contenteditable="true"]').first();
+        const guidePanelCandidates: Locator[] = [];
+        for (let depth = 1; depth <= 6; depth += 1) {
+          guidePanelCandidates.push(guideHeading.locator(`xpath=ancestor::*[self::section or self::article or self::div][${depth}]`));
+        }
+        for (const panel of guidePanelCandidates) {
+          if ((await panel.count()) === 0) continue;
+          const text = ((await panel.innerText().catch(() => "")) || "").trim();
+          if (!text || !/SELF-MAX GUIDE|Type your message/i.test(text)) continue;
+          if ((await guideComposer.count()) > 0) {
+            const containsComposer = await panel.locator('textarea[placeholder="Type your message..."], [contenteditable="true"]').count().catch(() => 0);
+            if (!containsComposer) continue;
+          }
+          const structured: string[] = [];
+          for (const selector of cssSelectors(selectors.coach.assistantMessages)) {
+            const bubbles = panel.locator(selector);
+            if ((await bubbles.count()) === 0) continue;
+            const texts = await bubbles.allTextContents().catch(() => []);
+            for (const entry of texts.map((value) => value.trim()).filter(Boolean)) {
+              structured.push(entry);
+            }
+            if (structured.length > 0) return structured;
+          }
+          const lines = splitVisibleLines(text).filter(
+            (line) =>
+              line.length > 2 &&
+              !/SELF-MAX GUIDE|Type your message|Send|⌘ \+ Enter to send/i.test(line)
+          );
+          if (lines.length > 0) return lines;
+        }
+      }
+
+      const bodyText = await page.locator("body").innerText().catch(() => "");
+      const lines = splitVisibleLines(bodyText);
+      const idx = lines.findIndex((line) => /Type your message/i.test(line));
+      if (idx > 0) {
+        const slice = lines
+          .slice(Math.max(0, idx - 24), idx)
+          .filter(
+            (line) =>
+              line.length > 2 &&
+              !/SELF-IMPROVE|GET TO WORK ON A GOAL|SELF-AWARENESS|LEARN ABOUT YOURSELF AND GET BETTER GUIDANCE|COMMUNITY|JOIN OTHER SELF-MAXERS|\(AND HM\) ON DISCORD|Help|More|WHAT DO YOU DESIRE TODAY\?|SELF-MAX GUIDE|GOAL CATEGORIES|YOUR GOALS|SHOW GOALS:|NEW GOAL|LIFESTORMING|Health|Work|Love|Family|Social|Fun|Dreams|Meaning|Active|Complete|Archived|All|Send|⌘ \+ Enter to send/i.test(
+                line
+              )
+          );
+        if (slice.length > 0) return slice;
+      }
+
+      return [];
     },
 
     async readAuthState(): Promise<AuthState> {
@@ -348,8 +395,8 @@ export function createAuthWorkflow(deps: AuthWorkflowDeps) {
         return;
       }
       await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" });
+      await deps.ensureGoalsWorkspaceVisible();
       if (!deps.sessionGate.isReady()) {
-        await deps.ensureGoalsWorkspaceVisible();
         deps.sessionGate.markReady();
       }
     }

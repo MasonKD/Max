@@ -113,6 +113,8 @@ node scripts/selfmax-smoke.mjs update-goal-due-date --goal-title "go rock climbi
 
 `npm run smoke:public` verifies only the public API adapter surface. It avoids private primitives so contract hardening stays focused on the real external interface.
 
+`get_state` accepts `includeArchived?: boolean` and defaults to `false`. When omitted, it returns active and completed goals only.
+
 Goal creation requires explicit inputs:
 - `create_goal` requires `title`, `category`, and `dueDate`
 - `create_goals_from_desires` requires each entry to include a due date

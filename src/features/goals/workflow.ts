@@ -4,6 +4,7 @@ import type { SearchRoot } from "../../platform/navigation.js";
 import { config } from "../../core/config.js";
 import { extractGoalsOverview, extractGoalSummariesFromText, dedupeGoalSummaries } from "../../platform/extractors.js";
 import { goalIdFromUrl, normalizeDateInput } from "../../platform/navigation.js";
+import { waitForBoolean } from "../../core/postconditions.js";
 import type { GoalCacheEntry } from "../../client/entityCache.js";
 
 type DesireGoalInput = Array<{
@@ -58,6 +59,7 @@ export type GoalsWorkflowDeps = {
   tryClickStartInGoalsList: () => Promise<boolean>;
   tryClickGoalCardAction: (goalTitle: string, actionTexts: string[]) => Promise<boolean>;
   resolveTaskInput: () => Promise<Locator>;
+  submitTaskInput: (field: Locator) => Promise<void>;
   resolveTaskRow: (taskText: string) => Promise<Locator>;
   resolveTaskRowWithinPanel: (taskText: string) => Promise<Locator | null>;
   readVisibleTaskItems: () => Promise<TaskItem[]>;
@@ -89,6 +91,7 @@ export type GoalsWorkflowDeps = {
   formatGoalDueLabel: (input: string) => string | null;
   waitForGoalDueLabel: (goalTitle: string, expectedLabel: string, timeoutMs?: number) => Promise<boolean>;
   openGoalEditPanel: () => Promise<Locator | null>;
+  openGoalStatusMenu: () => Promise<boolean>;
   clickGoalStatusAction: (status: "active" | "completed" | "archived") => Promise<boolean>;
 };
 
@@ -123,6 +126,65 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     }
   }
 
+  async function readGoalTaskSummaryFromGoals(goalTitle?: string): Promise<{
+    title: string;
+    taskPanelState: "tasks_present" | "add_tasks" | "empty";
+    taskSummaryLabel?: string;
+    taskPreviewItems?: string[];
+  } | null> {
+    if (!goalTitle) return null;
+    return deps.withTemporaryPage(async (page) => {
+      await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" });
+      const deadline = Date.now() + 3000;
+      let text = "";
+      while (Date.now() < deadline) {
+        text = await page.locator("body").innerText().catch(() => "");
+        if (/YOUR GOALS|SHOW GOALS:|Active \(\d+\)/i.test(text)) break;
+        await page.waitForTimeout(250);
+      }
+      const goals = extractGoalSummariesFromText(text);
+      const match = goals.find((goal) => normalizeKey(goal.title) === normalizeKey(goalTitle));
+      if (!match) return null;
+      return {
+        title: match.title,
+        taskPanelState: match.taskPanelState ?? "empty",
+        taskSummaryLabel: match.taskSummaryLabel,
+        taskPreviewItems: match.taskPreviewItems
+      };
+    }).catch(() => null);
+  }
+
+  function findCachedGoalSummary(goalTitle?: string, goalId?: string): {
+    goalId?: string;
+    title: string;
+    taskPanelState: "tasks_present" | "add_tasks" | "empty";
+    taskSummaryLabel?: string;
+    taskPreviewItems?: string[];
+  } | null {
+    const normalizedTitle = normalizeKey(goalTitle);
+    for (const entry of Object.values(deps.entityGoals())) {
+      if (goalId && entry.goalId === goalId) {
+        return {
+          goalId: entry.goalId,
+          title: entry.title ?? goalTitle ?? entry.goalId,
+          taskPanelState: entry.taskPanelState ?? "empty",
+          taskSummaryLabel: entry.taskSummaryLabel,
+          taskPreviewItems: entry.taskPreviewItems
+        };
+      }
+      if (normalizedTitle && normalizeKey(entry.title) === normalizedTitle) {
+        return {
+          goalId: entry.goalId,
+          title: entry.title ?? goalTitle ?? entry.goalId,
+          taskPanelState: entry.taskPanelState ?? "empty",
+          taskSummaryLabel: entry.taskSummaryLabel,
+          taskPreviewItems: entry.taskPreviewItems
+        };
+      }
+    }
+    return null;
+  }
+
   async function resolveGoalIdentity(goalTitle?: string, goalId?: string): Promise<{ goalId: string; goalTitle?: string }> {
     let resolvedGoalId = goalId;
     let resolvedGoalTitle = goalTitle;
@@ -148,35 +210,68 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     before: { active: number | null; complete: number | null; archived: number | null },
     timeoutMs = 4000
   ): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      await deps.ensureOnGoals();
-      const [activeAfter, completeAfter, archivedAfter] = await Promise.all([
-        deps.readGoalCount("Active"),
-        deps.readGoalCount("Complete"),
-        deps.readGoalCount("Archived")
-      ]);
-      const activeGoals = await createGoalsWorkflowInstance.listGoals("active");
-      const activeHasGoal = goalTitle ? activeGoals.goals.some((goal) => goal.title === goalTitle) : undefined;
+    try {
+      await waitForBoolean(
+        deps.pageOrThrow(),
+        async () => {
+          await deps.ensureOnGoals();
+          const [activeAfter, completeAfter, archivedAfter] = await Promise.all([
+            deps.readGoalCount("Active"),
+            deps.readGoalCount("Complete"),
+            deps.readGoalCount("Archived")
+          ]);
+          const activeGoals = await createGoalsWorkflowInstance.listGoals("active");
+          const activeHasGoal = goalTitle ? activeGoals.goals.some((goal) => goal.title === goalTitle) : undefined;
 
-      if (nextStatus === "completed") {
-        if ((before.complete !== null && completeAfter !== null && completeAfter > before.complete) || activeHasGoal === false) return true;
-      }
-      if (nextStatus === "archived") {
-        if ((before.archived !== null && archivedAfter !== null && archivedAfter > before.archived) || activeHasGoal === false) return true;
-      }
-      if (nextStatus === "active") {
-        if (
-          (before.active !== null && activeAfter !== null && activeAfter > before.active) ||
-          activeHasGoal === true ||
-          (before.complete !== null && completeAfter !== null && completeAfter < before.complete) ||
-          (before.archived !== null && archivedAfter !== null && archivedAfter < before.archived)
-        ) return true;
-      }
-
-      await deps.pageOrThrow().waitForTimeout(250);
+          if (nextStatus === "completed") {
+            return Boolean((before.complete !== null && completeAfter !== null && completeAfter > before.complete) || activeHasGoal === false);
+          }
+          if (nextStatus === "archived") {
+            return Boolean((before.archived !== null && archivedAfter !== null && archivedAfter > before.archived) || activeHasGoal === false);
+          }
+          return Boolean(
+            (before.active !== null && activeAfter !== null && activeAfter > before.active) ||
+            activeHasGoal === true ||
+            (before.complete !== null && completeAfter !== null && completeAfter < before.complete) ||
+            (before.archived !== null && archivedAfter !== null && archivedAfter < before.archived)
+          );
+        },
+        timeoutMs,
+        `goal status did not transition to ${nextStatus}${goalTitle ? ` for ${goalTitle}` : ""}`,
+        250
+      );
+      return true;
+    } catch {
+      return false;
     }
-    return false;
+  }
+
+  async function hydrateGoalsList(page: Page): Promise<void> {
+    for (let i = 0; i < 4; i += 1) {
+      await page.mouse.wheel(0, 1800).catch(() => undefined);
+      await page.waitForTimeout(150);
+    }
+    for (let i = 0; i < 4; i += 1) {
+      await page.mouse.wheel(0, -1800).catch(() => undefined);
+      await page.waitForTimeout(100);
+    }
+  }
+
+  async function resolveGoalsSection(page: Page): Promise<Locator | null> {
+    const heading = page.getByText(/^YOUR GOALS$/i).first();
+    if ((await heading.count()) === 0) return null;
+    const candidates = [
+      heading.locator("xpath=ancestor::*[self::section or self::article][1]"),
+      heading.locator("xpath=ancestor::*[self::div][1]"),
+      heading.locator("xpath=ancestor::*[self::div][2]"),
+      heading.locator("xpath=ancestor::*[self::div][3]")
+    ];
+    for (const candidate of candidates) {
+      if ((await candidate.count()) === 0) continue;
+      const text = ((await candidate.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      if (/YOUR GOALS|SHOW GOALS:/i.test(text)) return candidate;
+    }
+    return null;
   }
 
   const createGoalsWorkflowInstance = {
@@ -195,15 +290,17 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       const auth = await deps.readAuthState();
 
       const normalized = filter.trim().toLowerCase();
+      const goalsSection = await resolveGoalsSection(page);
       if (normalized === "active") {
-        await deps.tryClickByText(page, ["Active"]);
+        await deps.tryClickByText(page, ["Active"], goalsSection ?? undefined);
       } else if (normalized === "complete") {
-        await deps.tryClickByText(page, ["Complete"]);
+        await deps.tryClickByText(page, ["Complete", "Completed"], goalsSection ?? undefined);
       } else if (normalized === "archived") {
-        await deps.tryClickByText(page, ["Archived"]);
+        await deps.tryClickByText(page, ["Archived"], goalsSection ?? undefined);
       } else {
-        await deps.tryClickByText(page, ["All"]);
+        await deps.tryClickByText(page, ["All"], goalsSection ?? undefined);
       }
+      await hydrateGoalsList(page);
 
       const goals = await page.evaluate(() => {
         const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
@@ -215,7 +312,11 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         const candidates = Array.from(scope.querySelectorAll("article, section, li, div"))
           .filter((node) => {
             const text = normalize(node.textContent || "");
-            return Boolean(text) && /^START$/im.test(node.textContent || "") && /Due\s+\d{2}\/\d{2}\/\d{2}/i.test(text);
+            return (
+              Boolean(text) &&
+              /(START|VIEW|OPEN)/im.test(node.textContent || "") &&
+              /Due\s+\d{2}\/\d{2}\/\d{2}/i.test(text)
+            );
           });
 
         const seen = new Set<string>();
@@ -352,14 +453,35 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     },
 
     async readGoalFull(goalTitle?: string, goalId?: string) {
+      const shallowTaskSummary = await deps.getGoalTaskSummary(goalTitle, goalId).catch(() => null);
       await deps.openGoalForRead(goalTitle, goalId);
       const page = deps.pageOrThrow();
+      const workspaceUrl = page.url();
       const snapshot = await deps.captureCurrentGoalWorkspace();
       const tasks = await this.listGoalTasks(goalTitle ?? snapshot.title, goalId ?? goalIdFromUrl(page.url()));
       const resolvedGoalId = goalId ?? goalIdFromUrl(page.url()) ?? tasks.goalId;
       const resolvedGoalTitle = goalTitle ?? snapshot.title ?? tasks.goalTitle;
       if (resolvedGoalId) deps.cacheGoal({ goalId: resolvedGoalId, title: resolvedGoalTitle, category: snapshot.category, dueLabel: snapshot.dueLabel, progressLabel: snapshot.progressLabel });
-      return { goalId: resolvedGoalId, goalTitle: resolvedGoalTitle, url: page.url(), workspaceVisible: await deps.isGoalWorkspaceVisible(), category: snapshot.category, dueLabel: snapshot.dueLabel, progressLabel: snapshot.progressLabel, statusBlocks: snapshot.statusBlocks, messages: snapshot.messages, tasks: tasks.tasks, taskReadReason: tasks.reason, snippet: snapshot.snippet };
+      return {
+        goalId: resolvedGoalId,
+        goalTitle: resolvedGoalTitle,
+        url: workspaceUrl,
+        workspaceVisible: await deps.isGoalWorkspaceVisible(),
+        category: snapshot.category,
+        dueLabel: snapshot.dueLabel,
+        progressLabel: snapshot.progressLabel,
+        statusBlocks: snapshot.statusBlocks,
+        messages: snapshot.messages,
+        tasks:
+          tasks.tasks.length > 0
+            ? tasks.tasks
+            : (shallowTaskSummary?.taskPreviewItems ?? []).map((text) => ({ text, completed: false })),
+        taskReadReason:
+          tasks.tasks.length > 0
+            ? tasks.reason
+            : shallowTaskSummary?.taskSummaryLabel ?? tasks.reason,
+        snippet: snapshot.snippet
+      };
     },
 
     async readGoalStatusDetails(goalTitle?: string, goalId?: string): Promise<{ goalId?: string; goalTitle?: string; url: string; details: GoalStatusDetail[] }> {
@@ -381,7 +503,13 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       };
       const details: GoalStatusDetail[] = snapshot.statusBlocks.map((block) => {
         const key = fieldKeyByName[block.name] ?? block.name.toLowerCase();
-        const summary = undefined;
+        const summary =
+          block.prompts.find(
+            (prompt) =>
+              !/^(Updated\b|Not yet updated\b)/i.test(prompt) &&
+              !/\?$/.test(prompt.trim()) &&
+              prompt.trim().length > 0
+          ) ?? undefined;
         const updatedAt = null;
         const hasNotUpdatedPrompt = block.prompts.some((prompt) => /not yet updated/i.test(prompt));
         const checked = !hasNotUpdatedPrompt && !/^○$/u.test(block.state.trim());
@@ -400,12 +528,66 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     },
 
     async listGoalTasks(goalTitle?: string, goalId?: string): Promise<{ goalId?: string; goalTitle?: string; url: string; workspaceVisible: boolean; reason?: string; snippet?: string; tasks: TaskItem[] }> {
-      const summary = await deps.getGoalTaskSummary(goalTitle, goalId);
+      const cachedSummary = findCachedGoalSummary(goalTitle, goalId);
+      const summary = cachedSummary ?? await readGoalTaskSummaryFromGoals(goalTitle);
       if (summary?.taskPanelState === "add_tasks") {
-        return { goalId: goalId ?? summary.goalId, goalTitle: goalTitle ?? summary.title, url: deps.pageOrThrow().url(), workspaceVisible: false, reason: summary.taskSummaryLabel ?? "No tasks", snippet: await deps.readBodySnippet().catch(() => ""), tasks: [] };
+        return {
+          goalId: goalId ?? cachedSummary?.goalId,
+          goalTitle: goalTitle ?? summary.title,
+          url: deps.pageOrThrow().url(),
+          workspaceVisible: await deps.isGoalWorkspaceVisible().catch(() => false),
+          reason: summary.taskSummaryLabel ?? "No tasks",
+          snippet: await deps.readBodySnippet().catch(() => ""),
+          tasks: []
+        };
       }
       if (summary?.taskPanelState === "tasks_present" && (summary.taskPreviewItems?.length ?? 0) > 0) {
-        return { goalId: goalId ?? summary.goalId, goalTitle: goalTitle ?? summary.title, url: deps.pageOrThrow().url(), workspaceVisible: false, reason: summary.taskSummaryLabel, snippet: await deps.readBodySnippet().catch(() => ""), tasks: summary.taskPreviewItems!.map((text) => ({ text, completed: false })) };
+        return {
+          goalId: goalId ?? cachedSummary?.goalId,
+          goalTitle: goalTitle ?? summary.title,
+          url: deps.pageOrThrow().url(),
+          workspaceVisible: await deps.isGoalWorkspaceVisible().catch(() => false),
+          reason: summary.taskSummaryLabel,
+          snippet: await deps.readBodySnippet().catch(() => ""),
+          tasks: summary.taskPreviewItems!.map((text) => ({ text, completed: false }))
+        };
+      }
+
+      if (await deps.isGoalContextOpen(goalTitle)) {
+        await deps.openGoalForRead(goalTitle, goalId);
+        const page = deps.pageOrThrow();
+        try {
+          await deps.ensureOnGoalTaskContext(goalTitle, goalId);
+        } catch (error) {
+          return {
+            goalId: goalId ?? goalIdFromUrl(page.url()),
+            goalTitle,
+            url: page.url(),
+            workspaceVisible: await deps.isGoalWorkspaceVisible(),
+            reason: error instanceof Error ? error.message : String(error),
+            snippet: await deps.readBodySnippet(),
+            tasks: []
+          };
+        }
+        const tasks = await deps.readVisibleTaskItems();
+        const resolvedGoalId = goalId ?? goalIdFromUrl(page.url());
+        return {
+          goalId: resolvedGoalId,
+          goalTitle,
+          url: page.url(),
+          workspaceVisible: await deps.isGoalWorkspaceVisible(),
+          reason: tasks.length === 0 ? "no visible tasks extracted" : undefined,
+          snippet: await deps.readBodySnippet(),
+          tasks
+        };
+      }
+
+      const goalSummary = await deps.getGoalTaskSummary(goalTitle, goalId);
+      if (goalSummary?.taskPanelState === "add_tasks") {
+        return { goalId: goalId ?? goalSummary.goalId, goalTitle: goalTitle ?? goalSummary.title, url: deps.pageOrThrow().url(), workspaceVisible: false, reason: goalSummary.taskSummaryLabel ?? "No tasks", snippet: await deps.readBodySnippet().catch(() => ""), tasks: [] };
+      }
+      if (goalSummary?.taskPanelState === "tasks_present" && (goalSummary.taskPreviewItems?.length ?? 0) > 0) {
+        return { goalId: goalId ?? goalSummary.goalId, goalTitle: goalTitle ?? goalSummary.title, url: deps.pageOrThrow().url(), workspaceVisible: false, reason: goalSummary.taskSummaryLabel, snippet: await deps.readBodySnippet().catch(() => ""), tasks: goalSummary.taskPreviewItems!.map((text) => ({ text, completed: false })) };
       }
 
       await deps.openGoalForRead(goalTitle, goalId);
@@ -613,8 +795,9 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
         archived: await deps.readGoalCount("Archived")
       };
       const resolved = await resolveGoalIdentity(goalTitle, goalId);
-      const opened = await deps.openGoalEditPanel();
-      const done = Boolean(opened) && await deps.clickGoalStatusAction(status);
+      await deps.openGoalForRead(resolved.goalTitle, resolved.goalId);
+      const opened = await deps.openGoalStatusMenu();
+      const done = opened && await deps.clickGoalStatusAction(status);
       if (!done) throw new Error(`could not set goal status: ${status}`);
       const transitioned = await waitForGoalStatusChange(status, resolved.goalTitle, before);
       if (!transitioned) throw new Error(`setGoalStatus postcondition failed: ${status}`);
@@ -650,9 +833,11 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const clicked = await deps.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
         if (!clicked) {
-          await deps.tryClickByText(page, ["All"]);
-          const clickedAfterReset = await deps.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
-          if (!clickedAfterReset) await deps.tryOpenAnyGoalByLink();
+          for (const filterTexts of [["Active"], ["Complete", "Completed"], ["Archived"], ["All"]] as const) {
+            await deps.tryClickByText(page, [...filterTexts]);
+            const clickedAfterFilter = await deps.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
+            if (clickedAfterFilter) break;
+          }
         }
         if (await deps.waitForGoalContext(goalTitle, 2000)) return { started: true, goalTitle, goalId: goalIdFromUrl(deps.pageOrThrow().url()) };
         const byIds = await deps.listGoalIdsFromPage();
@@ -687,12 +872,10 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
       }
       let added = 0;
       const addedTaskTexts: string[] = [];
-      if (summary?.taskPanelState === "add_tasks") await deps.tryClickByText(page, ["ADD TASKS", "Add Tasks", "Use the task suggestion tool"]);
       for (const task of requestedTasks) {
-        await deps.tryClickByText(page, ["Add new task", "Add task", "New task"]);
         const field = await deps.resolveTaskInput();
         await field.fill(task);
-        await field.press("Enter");
+        await deps.submitTaskInput(field);
         const observed = await deps.waitForTaskToAppear(task, 3000);
         addedTaskTexts.push(observed?.text ?? task);
         added += 1;
@@ -703,9 +886,9 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     async removeTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string) {
       if (!taskText.trim()) throw new Error("remove_task requires taskText");
       const summary = await deps.getGoalTaskSummary(goalTitle, goalId);
-      if (summary?.taskPanelState !== "tasks_present") throw new Error(`remove_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
-      const resolvedGoalTitle = goalTitle ?? summary.title;
-      let resolvedGoalId = goalId ?? summary.goalId;
+      const resolvedGoalTitle = goalTitle ?? summary?.title;
+      if (!resolvedGoalTitle) throw new Error(`remove_task could not resolve goal title for task: ${taskText}`);
+      let resolvedGoalId = goalId ?? summary?.goalId;
       await deps.ensureOnGoals();
       let removed = await deps.clickGoalCardTaskRemove(resolvedGoalTitle, taskText);
       if (!removed) {
@@ -736,8 +919,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     async completeTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string) {
       if (!taskText.trim()) throw new Error("complete_task requires taskText");
       const summary = await deps.getGoalTaskSummary(goalTitle, goalId);
-      if (summary?.taskPanelState !== "tasks_present") throw new Error(`complete_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
-      const resolvedGoalTitle = goalTitle ?? summary.title;
+      const resolvedGoalTitle = goalTitle ?? summary?.title;
+      if (!resolvedGoalTitle) throw new Error(`complete_task could not resolve goal title for task: ${taskText}`);
       await deps.ensureOnGoals();
       const counts = await deps.readGoalCardTaskCompletion(resolvedGoalTitle);
       const toggled = await deps.clickGoalCardTaskToggle(resolvedGoalTitle, taskText);
@@ -752,8 +935,8 @@ export function createGoalsWorkflow(deps: GoalsWorkflowDeps) {
     async uncompleteTask(goalTitle: string | undefined, goalId: string | undefined, taskText: string) {
       if (!taskText.trim()) throw new Error("uncomplete_task requires taskText");
       const summary = await deps.getGoalTaskSummary(goalTitle, goalId);
-      if (summary?.taskPanelState !== "tasks_present") throw new Error(`uncomplete_task refused: goal does not expose existing tasks from /goals summary (${summary?.title ?? goalTitle ?? "unknown"})`);
-      const resolvedGoalTitle = goalTitle ?? summary.title;
+      const resolvedGoalTitle = goalTitle ?? summary?.title;
+      if (!resolvedGoalTitle) throw new Error(`uncomplete_task could not resolve goal title for task: ${taskText}`);
       await deps.ensureOnGoals();
       const counts = await deps.readGoalCardTaskCompletion(resolvedGoalTitle);
       const toggled = await deps.clickGoalCardTaskToggle(resolvedGoalTitle, taskText);

@@ -114,7 +114,9 @@ export const primitiveRequestSchema = z.discriminatedUnion("name", primitiveRequ
 ]);
 
 const publicApiPayloadSchemas = {
-  get_state: z.object({}).strict().optional(),
+  get_state: z.object({
+    includeArchived: z.boolean().optional()
+  }).strict().optional(),
   get_goals: z.object({
     status: goalStatusSchema.optional(),
     category: goalCategorySchema.optional(),

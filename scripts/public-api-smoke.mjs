@@ -1,17 +1,9 @@
 #!/usr/bin/env node
 
-import { PublicApi } from "../src/api/index.js";
-import { SelfMaxPlaywrightClient } from "../src/client/index.js";
-import type { PublicApiRequest, SessionContext } from "../src/core/types.js";
+import { PublicApi } from "../dist/api/index.js";
+import { SelfMaxPlaywrightClient } from "../dist/client/index.js";
 
-type StepResult = {
-  step: string;
-  ok: boolean;
-  error: string | null;
-  result: unknown;
-};
-
-function summarize(step: string, response: { ok: boolean; error?: string; result?: unknown }): StepResult {
+function summarize(step, response) {
   return {
     step,
     ok: response.ok,
@@ -20,35 +12,31 @@ function summarize(step: string, response: { ok: boolean; error?: string; result
   };
 }
 
-async function run(publicApi: PublicApi, session: SessionContext, request: PublicApiRequest): Promise<StepResult> {
+async function run(publicApi, session, request) {
   const response = await publicApi.execute(request, session);
   return summarize(request.name, response);
 }
 
-async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-  if (items.length === 0) return [];
+async function mapWithConcurrency(items, concurrency, worker) {
+  if (!items.length) return [];
   const limit = Math.max(1, Math.floor(concurrency));
-  const results = new Array<R>(items.length);
+  const results = new Array(items.length);
   let nextIndex = 0;
 
-  const runWorker = async (): Promise<void> => {
+  async function runWorker() {
     while (true) {
       const current = nextIndex;
       nextIndex += 1;
       if (current >= items.length) return;
       results[current] = await worker(items[current], current);
     }
-  };
+  }
 
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runWorker()));
   return results;
 }
 
-async function main(): Promise<void> {
+async function main() {
   const fullSweep = process.argv.includes("--full");
   const reads = process.argv.includes("--reads");
   const sequence = process.argv.includes("--sequence");
@@ -59,7 +47,7 @@ async function main(): Promise<void> {
   try {
     await client.init();
 
-    const requests: PublicApiRequest[] = [
+    const requests = [
       { id: "1", name: "get_actions", payload: {} },
       { id: "2", name: "get_goals", payload: { status: "active", deep: false } },
       { id: "3", name: "get_desires", payload: { deep: false } }
@@ -99,7 +87,7 @@ async function main(): Promise<void> {
       );
     }
 
-    const results: StepResult[] = [];
+    const results = [];
     for (const request of requests) {
       const result = await run(publicApi, session, request);
       results.push(result);
@@ -107,12 +95,12 @@ async function main(): Promise<void> {
     }
 
     if (reads) {
-      const goals = results.find((result) => result.step === "get_goals")?.result as { goals?: Array<{ title?: string }> } | null;
-      const desires = results.find((result) => result.step === "get_desires")?.result as { desires?: Array<{ title?: string }> } | null;
-      const firstGoalTitle = goals?.goals?.find((goal) => typeof goal.title === "string" && goal.title.trim().length > 0)?.title;
-      const firstDesireTitle = desires?.desires?.find((desire) => typeof desire.title === "string" && desire.title.trim().length > 0)?.title;
+      const goals = results.find((result) => result.step === "get_goals")?.result;
+      const desires = results.find((result) => result.step === "get_desires")?.result;
+      const firstGoalTitle = goals?.goals?.find((goal) => typeof goal?.title === "string" && goal.title.trim().length > 0)?.title;
+      const firstDesireTitle = desires?.desires?.find((desire) => typeof desire?.title === "string" && desire.title.trim().length > 0)?.title;
 
-      const followUps: PublicApiRequest[] = [];
+      const followUps = [];
       if (firstGoalTitle) {
         followUps.push(
           { id: "20", name: "get_goal", payload: { goalTitle: firstGoalTitle, depth: 0 } },

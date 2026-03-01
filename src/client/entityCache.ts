@@ -132,3 +132,14 @@ export function findDesireIdByTitle(cache: SessionEntityCache, title: string): s
   }
   return undefined;
 }
+
+export function findDesireByTitle(cache: SessionEntityCache, title: string): DesireCacheEntry | undefined {
+  const normalized = normalizeKey(title);
+  if (!normalized) return undefined;
+  for (const entry of Object.values(cache.desiresById)) {
+    if (normalizeKey(entry.title) === normalized) {
+      return entry;
+    }
+  }
+  return undefined;
+}

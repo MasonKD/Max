@@ -114,6 +114,7 @@ These are the duplication points inside the in-scope path:
 
 2. Goal-status list traversal in `src/api/publicApi.ts`
 - `get_goals`, `get_goal`, and `get_state` all walk goal lists by status
+  - `get_state` now excludes archived goals by default unless `includeArchived: true`
 
 3. Chat response extraction in `src/api/publicApi.ts`
 - guide chat and goal chat both use the same before/after diff pattern

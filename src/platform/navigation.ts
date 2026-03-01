@@ -137,6 +137,9 @@ export async function clickByText(root: SearchRoot, texts: string[], scope?: Loc
     throw new SelectorError(`could not click any of: ${texts.join(", ")}`, {
       action: "refresh selector registry",
       detail: "target text no longer matches"
+    }, {
+      target: texts.join(" | "),
+      expected: "visible clickable text target"
     });
   }
 }
@@ -151,6 +154,9 @@ export async function resolveFirstVisible(root: SearchRoot, selectors: string[])
   throw new SelectorError(`could not locate any input for selectors: ${selectors.join(", ")}`, {
     action: "inspect selector tiers",
     detail: "promote a working fallback or add a new primary selector"
+  }, {
+    target: selectors.join(" | "),
+    expected: "visible input matching selector"
   });
 }
 
@@ -170,5 +176,7 @@ export async function waitForCondition(
   throw new TimeoutError(errorMessage, {
     action: "short-circuit retries or inspect loading state",
     detail: `timed out after ${timeoutMs}ms`
+  }, {
+    expected: errorMessage
   });
 }

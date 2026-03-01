@@ -26,6 +26,10 @@ export type LifestormingWorkflowDeps = {
 };
 
 export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
+  function categoryPathSegment(category: string): string {
+    return category.trim().toUpperCase();
+  }
+
   function normalizeKey(value: string | undefined): string {
     return value?.trim().toLowerCase() ?? "";
   }
@@ -38,6 +42,10 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       if (seen.has(normalized)) throw new Error(`${label} must be unique: "${value}"`);
       seen.add(normalized);
     }
+  }
+
+  function syntheticDesireId(title: string): string {
+    return `title:${normalizeKey(title)}`;
   }
 
   async function findDesireHrefOnRoot(page: Page, desire: string): Promise<string> {
@@ -58,6 +66,57 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
     }, desire).catch(() => "");
   }
 
+  function findCachedDesireCategory(title: string): string | undefined {
+    const normalized = normalizeKey(title);
+    if (!normalized) return undefined;
+    for (const entry of Object.values(deps.entityDesires())) {
+      if (normalizeKey(entry.title) === normalized && entry.category?.trim()) {
+        return entry.category;
+      }
+    }
+    return undefined;
+  }
+
+  async function findVisibleDesireLinksOnRoot(page: Page): Promise<Array<{ title: string; desireId: string }>> {
+    return page.evaluate(() => {
+      const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+      const isNoise = (value: string) =>
+        /^(GO|VIEW|OPEN|ADD TO GOALS|SAVE|EXIT|DELETE DESIRE)$/i.test(value) ||
+        /^STEP\s+\d+:/i.test(value) ||
+        /^(LIFESTORMING|BRAINSTORM|YOUR LIFE)$/i.test(value);
+      const rows = Array.from(document.querySelectorAll("a, button, [role='button']"));
+      const matches: Array<{ title: string; desireId: string }> = [];
+      for (const node of rows) {
+        const actionText = normalize(node.textContent || "");
+        if (!/^(GO|VIEW|OPEN)$/i.test(actionText)) continue;
+        const container = node.closest("li, article, section, div");
+        if (!container) continue;
+        const hrefNode = container.querySelector('a[href*="/lifestorming/sensation-practice/"]') || (node instanceof HTMLAnchorElement ? node : null);
+        const href = hrefNode instanceof HTMLAnchorElement ? hrefNode.href || "" : "";
+        const desireId = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i)?.[1];
+        if (!desireId) continue;
+        const title = Array.from(container.querySelectorAll("p, label, span, div"))
+          .map((element) => normalize(element.textContent || ""))
+          .find((text) => text.length > 2 && !isNoise(text));
+        if (!title) continue;
+        matches.push({ title, desireId });
+      }
+      const deduped = new Map<string, { title: string; desireId: string }>();
+      for (const match of matches) {
+        if (!deduped.has(match.desireId)) deduped.set(match.desireId, match);
+      }
+      return [...deduped.values()];
+    }).catch(() => []);
+  }
+
+  function tryCacheDesire(entry: { desireId: string; title?: string; category?: string }): void {
+    try {
+      deps.cacheDesire(entry);
+    } catch {
+      // Read paths should stay available even if the live page exposes duplicate or stale desire rows.
+    }
+  }
+
   return {
     async brainstormDesiresForEachCategory(itemsByCategory: CategoryItems) {
       const page = deps.ensurePage();
@@ -76,7 +135,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       let added = 0;
       const categories = Object.keys(itemsByCategory) as LifestormingCategory[];
       for (const category of categories) {
-        await page.goto(`${base}/lifestorming/desires-selection/${category.toLowerCase()}`, {
+        await page.goto(`${base}/lifestorming/desires-selection/${categoryPathSegment(category)}`, {
           waitUntil: "domcontentloaded"
         });
         await deps.waitForPageTextNotContaining("Loading Desires...", 2500);
@@ -88,9 +147,11 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
           await field.fill(item);
           const clicked = await deps.tryClickByText(page, ["Add", "ADD"]);
           if (!clicked) await field.press("Enter");
+          tryCacheDesire({ desireId: syntheticDesireId(item), title: item, category });
           added += 1;
         }
       }
+      await this.readLifestormingOverview().catch(() => undefined);
       return { categoriesUpdated: categories, itemsAdded: added };
     },
 
@@ -112,7 +173,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
           throw new Error(`did not reach sensation-practice route for ${desire.title}`);
         }
         const desireId = extractRouteParams(page.url()).desireId;
-        if (desireId) deps.cacheDesire({ desireId, title: desire.title });
+        if (desireId) tryCacheDesire({ desireId, title: desire.title });
         const notes = page.locator("textarea").filter({ hasNotText: "Type your message" }).first();
         if ((await notes.count()) > 0) {
           await notes.fill(desire.notes);
@@ -130,33 +191,16 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       await page.goto(`${base}/lifestorming`, { waitUntil: "domcontentloaded" });
       await deps.waitForPageTextNotContaining("Loading Lifestorming Page...", 2500);
       const result = extractLifestormingOverview(await page.locator("body").innerText().catch(() => ""));
-      const rootAnchors = await page.evaluate(() =>
-        Array.from(document.querySelectorAll('a[href*="/lifestorming/sensation-practice/"]')).map((el) => {
-          const href = (el as HTMLAnchorElement).href || "";
-          const match = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
-          const row = el.closest("li");
-          const titleNode = row
-            ? Array.from(row.querySelectorAll("p, label, span, div"))
-                .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
-                .find((text) => text.length > 2 && !/^(GO|VIEW|OPEN|ADD TO GOALS)$/i.test(text))
-            : undefined;
-          const title = titleNode || undefined;
-          return {
-            href,
-            desireId: match?.[1],
-            title
-          };
-        })
-      );
-      for (const anchor of rootAnchors) {
-        if (anchor.desireId && anchor.title) {
-          deps.cacheDesire({ desireId: anchor.desireId, title: anchor.title });
-        }
-      }
+      const rootLinks = await findVisibleDesireLinksOnRoot(page);
+      for (const link of rootLinks) tryCacheDesire(link);
       for (const section of result.desiresBySection) {
         for (const title of section.items) {
-          const existingId = deps.findDesireIdByTitle(title);
-          if (existingId) deps.cacheDesire({ desireId: existingId, title });
+          let existingId = deps.findDesireIdByTitle(title);
+          if (!existingId) {
+            const href = await findDesireHrefOnRoot(page, title);
+            existingId = href.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i)?.[1];
+          }
+          if (existingId) tryCacheDesire({ desireId: existingId, title });
         }
       }
       return { url: page.url(), ...result };
@@ -190,7 +234,7 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       let noteText = await page.locator("textarea").first().inputValue().catch(() => "");
       const resolvedDesireId = desireId ?? extractRouteParams(page.url()).desireId;
       if (resolvedDesireId && result.title && !/Desire not found\.?/i.test(result.title)) {
-        deps.cacheDesire({ desireId: resolvedDesireId, title: desireTitle ?? result.title, category: result.category });
+        tryCacheDesire({ desireId: resolvedDesireId, title: desireTitle ?? result.title, category: result.category });
       }
       return { desireId: resolvedDesireId, desireTitle: desireTitle ?? (result.title || undefined), category: result.category || undefined, url: page.url(), prompts: result.prompts, actions: result.actions, noteText, snippet: result.snippet };
     },
@@ -202,9 +246,23 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
       if (directHref) {
         const normalizedHref = new URL(directHref, page.url()).toString();
         const desireIdMatch = normalizedHref.match(/\/lifestorming\/sensation-practice\/([A-Za-z0-9_-]+)/i);
-        if (desireIdMatch?.[1]) deps.cacheDesire({ desireId: desireIdMatch[1], title: desire });
+        if (desireIdMatch?.[1]) tryCacheDesire({ desireId: desireIdMatch[1], title: desire });
         await page.goto(normalizedHref, { waitUntil: "domcontentloaded" });
         return;
+      }
+
+      const cachedCategory = findCachedDesireCategory(desire);
+      if (cachedCategory) {
+        const base = config.SELFMAX_BASE_URL.replace(/\/$/, "");
+        await page.goto(`${base}/lifestorming/desires-selection/${categoryPathSegment(cachedCategory)}`, { waitUntil: "domcontentloaded" });
+        await deps.waitForPageTextNotContaining("Loading Desires...", 2500);
+        const rowInCategory = await deps.resolveRowByText(desire, false);
+        if (rowInCategory) {
+          const viewedFromCategory =
+            (await deps.tryClickByText(page, ["VIEW", "GO", "Open"], rowInCategory)) ||
+            (await deps.tryClickByText(page, [desire]));
+          if (viewedFromCategory) return;
+        }
       }
 
       let viewed = false;
@@ -227,6 +285,17 @@ export function createLifestormingWorkflow(deps: LifestormingWorkflowDeps) {
     },
 
     async readCachedDesires() {
+      if (Object.keys(deps.entityDesires()).length === 0) {
+        const overview = await this.readLifestormingOverview().catch(() => null);
+        const titles = overview
+          ? [...new Set(overview.desiresBySection.flatMap((section) => section.items).map((item) => item.trim()).filter((item) => item.length > 0))]
+          : [];
+        for (const title of titles) {
+          const existing = Object.values(deps.entityDesires()).find((entry) => entry.title?.trim().toLowerCase() === title.trim().toLowerCase());
+          if (existing?.desireId && existing.category?.trim()) continue;
+          await this.readSensationPractice(undefined, title).catch(() => undefined);
+        }
+      }
       return { desires: Object.values(deps.entityDesires()).sort((a, b) => b.lastSeenAt.localeCompare(a.lastSeenAt)) };
     }
   };

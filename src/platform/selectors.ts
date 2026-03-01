@@ -30,6 +30,9 @@ export const selectors = {
     input: [
       { tier: "primary", selector: 'textarea[placeholder="Type your message..."]' },
       { tier: "fallback", selector: '[contenteditable="true"]' }
+    ] satisfies CssSelectorCandidate[],
+    assistantMessages: [
+      { tier: "primary", selector: '.flex.justify-start .whitespace-pre-wrap' }
     ] satisfies CssSelectorCandidate[]
   },
   goals: {
@@ -48,14 +51,18 @@ export const selectors = {
     cardOpenActions: [
       { tier: "primary", text: "START" }
     ] satisfies TextSelectorCandidate[],
+    dueDateEditTargets: [
+      { tier: "primary", selector: '[title="Click to edit due date"]' },
+      { tier: "fallback", selector: '[title*="edit due date" i]' }
+    ] satisfies CssSelectorCandidate[],
     taskEntryActions: [
       { tier: "primary", text: "ADD TASKS" },
-      { tier: "fallback", text: "Add Tasks" },
-      { tier: "fallback", text: "Use the task suggestion tool" }
+      { tier: "fallback", text: "Add Tasks" }
     ] satisfies TextSelectorCandidate[],
     statusActions: {
       completed: [
-        { tier: "primary", text: "COMPLETE GOAL" },
+        { tier: "primary", text: "Mark as Completed" },
+        { tier: "fallback", text: "MARK AS COMPLETED" },
         { tier: "fallback", text: "Complete Goal" }
       ] satisfies TextSelectorCandidate[],
       archived: [
@@ -63,20 +70,29 @@ export const selectors = {
         { tier: "fallback", text: "Archive Goal" }
       ] satisfies TextSelectorCandidate[],
       active: [
-        { tier: "primary", text: "REACTIVATE GOAL" },
+        { tier: "primary", text: "Mark as Active" },
+        { tier: "fallback", text: "MARK AS ACTIVE" },
         { tier: "fallback", text: "Reactivate Goal" }
       ] satisfies TextSelectorCandidate[]
     }
   },
   tasks: {
     taskTab: [
-      { tier: "primary", text: "TASKS" },
-      { tier: "fallback", text: "Tasks" }
+      { tier: "primary", text: "EDIT TASKS" },
+      { tier: "fallback", text: "Edit Tasks" },
+      { tier: "primary", text: "TASKS" }
     ] satisfies TextSelectorCandidate[],
+    manualInput: [
+      { tier: "primary", selector: 'input[placeholder="Add new task"]' },
+      { tier: "fallback", selector: 'input[placeholder*="Add new task" i]' }
+    ] satisfies CssSelectorCandidate[],
+    manualSubmit: [
+      { tier: "primary", selector: 'input[placeholder="Add new task"] + button' },
+      { tier: "fallback", selector: 'input[placeholder*="Add new task" i] + button' }
+    ] satisfies CssSelectorCandidate[],
     panelAnchors: [
       { tier: "primary", text: "How will you accomplish" },
-      { tier: "primary", text: "Add new task" },
-      { tier: "fallback", text: "Use the task suggestion tool" }
+      { tier: "primary", text: "Add new task" }
     ] satisfies TextSelectorCandidate[]
   },
   lifestorming: {

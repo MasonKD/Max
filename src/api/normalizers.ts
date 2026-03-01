@@ -22,11 +22,28 @@ export function isPublicCategory(value: unknown): value is PublicCategory {
   return ["Health", "Work", "Love", "Family", "Social", "Fun", "Dreams", "Meaning"].includes(String(value));
 }
 
-export function requirePublicCategory(value: unknown, goalTitle: string): PublicCategory {
-  if (!isPublicCategory(value)) {
-    throw new Error(`missing or invalid category for goal "${goalTitle}"`);
+export function normalizePublicCategory(value: unknown): PublicCategory | undefined {
+  if (typeof value !== "string") return undefined;
+  const normalized = value.trim().toLowerCase();
+  const mapping: Record<string, PublicCategory> = {
+    health: "Health",
+    work: "Work",
+    love: "Love",
+    family: "Family",
+    social: "Social",
+    fun: "Fun",
+    dreams: "Dreams",
+    meaning: "Meaning"
+  };
+  return mapping[normalized];
+}
+
+export function requirePublicCategory(value: unknown, entityTitle: string, entityKind: "goal" | "desire" = "goal"): PublicCategory {
+  const normalized = normalizePublicCategory(value);
+  if (!normalized) {
+    throw new Error(`missing or invalid category for ${entityKind} "${entityTitle}"`);
   }
-  return value;
+  return normalized;
 }
 
 export function requirePublicDueDate(value: unknown, goalTitle: string): PublicDueDate {
@@ -62,7 +79,7 @@ export function normalizeChatHistory(messages: unknown[] | undefined, depth?: nu
 export function sliceDepth<T>(items: T[], depth: number | undefined): T[] {
   if (depth === -1) return items;
   const normalized = typeof depth === "number" ? Math.max(0, depth) : 0;
-  return items.slice(-(normalized + 1));
+  return items.slice(0, normalized + 1);
 }
 
 export const internalPrimitiveNames = [

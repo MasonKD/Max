@@ -17,7 +17,7 @@ export function createLifestormingSupport(deps: LifestormingSupportDeps) {
 
     async waitForDesiresCategory(category: string, timeoutMs = 2500, page = deps.pageOrThrow()): Promise<void> {
       const expected = category.trim().toUpperCase();
-      const expectedPath = `/lifestorming/desires-selection/${category.trim().toLowerCase()}`;
+      const expectedPath = `/lifestorming/desires-selection/${expected}`;
       const deadline = Date.now() + timeoutMs;
       while (Date.now() < deadline) {
         const lines = (await page.locator("body").innerText().catch(() => "")).split(/\n+/).map((line) => line.trim()).filter(Boolean);

@@ -6,7 +6,8 @@ import { extractTaskItemsFromGoalPage } from "../../platform/extractors.js";
 import type { SearchRoot } from "../../platform/navigation.js";
 import { goalIdFromUrl, normalizeDateInput, titleCase } from "../../platform/navigation.js";
 import { StateError } from "../../core/recovery.js";
-import { selectors, textSelectors } from "../../platform/selectors.js";
+import { waitForBoolean, waitForTruthy } from "../../core/postconditions.js";
+import { cssSelectors, selectors, textSelectors } from "../../platform/selectors.js";
 import type { GoalStatusBlock, TaskItem } from "../../core/types.js";
 
 export type GoalsSupportDeps = {
@@ -30,25 +31,103 @@ export type GoalsSupportDeps = {
 };
 
 export function createGoalsSupport(deps: GoalsSupportDeps) {
+  async function readTaskItemsFromDom(root: Locator): Promise<TaskItem[]> {
+    return root.evaluate((node) => {
+      const normalize = (value: string) => value.replace(/\s+/g, " ").trim();
+      const rows = Array.from(
+        node.querySelectorAll('div, li, article, section')
+      ).filter((el) => {
+        const button = el.querySelector('button[aria-label="Mark as complete"], button[aria-label="Mark as incomplete"]');
+        const text = normalize((el.querySelector("span") as HTMLElement | null)?.innerText || el.textContent || "");
+        return Boolean(button && text);
+      });
+
+      const seen = new Set<string>();
+      const tasks: TaskItem[] = [];
+      for (const row of rows) {
+        const button = row.querySelector('button[aria-label="Mark as complete"], button[aria-label="Mark as incomplete"]');
+        const span = row.querySelector("span");
+        const text = normalize((span as HTMLElement | null)?.innerText || row.textContent || "");
+        if (!button || !text) continue;
+        const key = text.toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const aria = button.getAttribute("aria-label") || "";
+        tasks.push({
+          text,
+          completed: /mark as incomplete/i.test(aria)
+        });
+      }
+      return tasks;
+    }).catch(() => []);
+  }
+
   return {
+    async resolveGoalsSection(): Promise<Locator | null> {
+      const page = deps.pageOrThrow();
+      const heading = page.getByText(/^YOUR GOALS$/i).first();
+      if ((await heading.count()) === 0) return null;
+      const candidates = [
+        heading.locator("xpath=ancestor::*[self::section or self::article][1]"),
+        heading.locator("xpath=ancestor::*[self::div][1]"),
+        heading.locator("xpath=ancestor::*[self::div][2]"),
+        heading.locator("xpath=ancestor::*[self::div][3]")
+      ];
+      for (const candidate of candidates) {
+        if ((await candidate.count()) === 0) continue;
+        const text = ((await candidate.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+        if (/YOUR GOALS|SHOW GOALS:/i.test(text)) return candidate;
+      }
+      return null;
+    },
+
+    async hydrateGoalsList(): Promise<void> {
+      const page = deps.pageOrThrow();
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
+      for (let i = 0; i < 10; i += 1) {
+        await page.mouse.wheel(0, 1800).catch(() => undefined);
+        await page.waitForTimeout(150);
+      }
+      for (let i = 0; i < 10; i += 1) {
+        await page.mouse.wheel(0, -1800).catch(() => undefined);
+        await page.waitForTimeout(100);
+      }
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => undefined);
+    },
+
     async getGoalTaskSummary(goalTitle?: string, goalId?: string) {
+      const filters = ["active", "complete", "archived", "all"] as const;
       if (goalId) {
-        const listed = await deps.listGoals("active");
-        const byId = listed.goals.find((goal) => goal.goalId === goalId);
-        if (byId?.taskPanelState) {
-          return {
-            goalId,
-            title: byId.title ?? goalTitle ?? goalId,
-            taskPanelState: byId.taskPanelState,
-            taskSummaryLabel: byId.taskSummaryLabel,
-            taskPreviewItems: byId.taskPreviewItems
-          };
+        for (const filter of filters) {
+          const listed = await deps.listGoals(filter);
+          const byId = listed.goals.find((goal) => goal.goalId === goalId);
+          if (byId?.taskPanelState) {
+            return {
+              goalId,
+              title: byId.title ?? goalTitle ?? goalId,
+              taskPanelState: byId.taskPanelState,
+              taskSummaryLabel: byId.taskSummaryLabel,
+              taskPreviewItems: byId.taskPreviewItems
+            };
+          }
         }
       }
 
-      const listed = await deps.listGoals("active");
       const resolvedTitle = goalTitle;
-      const match = listed.goals.find((goal) => (goalId && goal.goalId === goalId) || (resolvedTitle && goal.title === resolvedTitle));
+      let match:
+        | {
+            title: string;
+            goalId?: string;
+            taskPanelState?: "tasks_present" | "add_tasks" | "empty";
+            taskSummaryLabel?: string;
+            taskPreviewItems?: string[];
+          }
+        | undefined;
+      for (const filter of filters) {
+        const listed = await deps.listGoals(filter);
+        match = listed.goals.find((goal) => (goalId && goal.goalId === goalId) || (resolvedTitle && goal.title === resolvedTitle));
+        if (match) break;
+      }
       if (!match) return null;
       return {
         goalId: match.goalId ?? (goalTitle ? deps.findGoalIdByTitle(goalTitle) : undefined),
@@ -62,25 +141,29 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
     async resolveGoalCard(goalTitle: string): Promise<Locator | null> {
       const page = deps.pageOrThrow();
       await deps.ensureOnGoals();
-      const title = page.getByText(goalTitle, { exact: false }).first();
+      await this.hydrateGoalsList();
+      const section = await this.resolveGoalsSection();
+      const title = (section ?? page).getByText(goalTitle, { exact: false }).first();
       if ((await title.count()) === 0) return null;
 
-      const containers = [
-        title.locator("xpath=ancestor::*[self::article or self::section][1]"),
-        title.locator("xpath=ancestor::*[self::div][1]"),
-        title.locator("xpath=ancestor::*[self::div][2]"),
-        title.locator("xpath=ancestor::*[self::div][3]"),
-        title.locator("xpath=ancestor::*[self::div][4]")
-      ];
+      const containers: Locator[] = [];
+      for (let depth = 1; depth <= 8; depth += 1) {
+        containers.push(title.locator(`xpath=ancestor::*[self::article or self::section or self::div][${depth}]`));
+      }
 
+      let best: Locator | null = null;
+      let bestLength = -1;
       for (const container of containers) {
         if ((await container.count()) === 0) continue;
         const text = ((await container.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
         if (!text.includes(goalTitle)) continue;
-        if (!/START|Due |tasks completed|No tasks|ADD TASKS/i.test(text)) continue;
-        return container;
+        if (!/START|Due |tasks completed|No tasks|ADD TASKS|Mark as /i.test(text)) continue;
+        if (text.length > bestLength) {
+          best = container;
+          bestLength = text.length;
+        }
       }
-      return null;
+      return best;
     },
 
     async resolveTaskRowInGoalCard(goalTitle: string, taskText: string): Promise<Locator | null> {
@@ -96,16 +179,22 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
       const rows = card.locator("div");
       const count = await rows.count();
+      let best: Locator | null = null;
+      let bestLength = Number.POSITIVE_INFINITY;
       for (let i = 0; i < count; i += 1) {
         const row = rows.nth(i);
         const text = normalizeTaskText(await row.innerText().catch(() => ""));
         if (!text) continue;
-        if (text !== normalized) continue;
+        if (!(text === normalized || text.includes(normalized) || normalized.includes(text))) continue;
         const buttons = row.locator("button");
-        if ((await buttons.count()) > 0) return row;
+        if ((await buttons.count()) === 0) continue;
+        if (text.length < bestLength) {
+          best = row;
+          bestLength = text.length;
+        }
       }
 
-      return null;
+      return best;
     },
 
     async readGoalCardTaskCompletion(goalTitle: string): Promise<{ completed: number; total: number } | null> {
@@ -117,24 +206,39 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
     },
 
     async waitForGoalCardTaskCompletionDelta(goalTitle: string, previousCompleted: number, delta: number, timeoutMs = 2500): Promise<boolean> {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const counts = await this.readGoalCardTaskCompletion(goalTitle);
-        if (counts && counts.completed === previousCompleted + delta) return true;
-        await deps.pageOrThrow().waitForTimeout(200);
+      try {
+        await waitForTruthy(
+          deps.pageOrThrow(),
+          () => this.readGoalCardTaskCompletion(goalTitle),
+          (counts) => Boolean(counts && counts.completed === previousCompleted + delta),
+          timeoutMs,
+          `goal card task completion did not change by ${delta} for ${goalTitle}`
+        );
+        return true;
+      } catch {
+        return false;
       }
-      return false;
     },
 
     async clickGoalCardTaskToggle(goalTitle: string, taskText: string): Promise<boolean> {
-      const row = await this.resolveTaskRowInGoalCard(goalTitle, taskText);
-      if (!row) return false;
-      await row.hover().catch(() => undefined);
-      const buttons = row.locator("button");
-      const count = await buttons.count();
-      if (count === 0) return false;
-      await buttons.first().click({ timeout: 1500 }).catch(() => undefined);
-      return true;
+      const card = await this.resolveGoalCard(goalTitle);
+      if (!card) return false;
+      const clickedByStructuredRow = await card.evaluate((root, requestedTaskText) => {
+        const normalize = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+        const requested = normalize(requestedTaskText);
+        const rows = Array.from(root.querySelectorAll("div, li, article, section"));
+        for (const row of rows) {
+          const button = row.querySelector('button[aria-label="Mark as complete"], button[aria-label="Mark as incomplete"]') as HTMLButtonElement | null;
+          const span = row.querySelector("span");
+          const text = normalize((span as HTMLElement | null)?.innerText || row.textContent || "");
+          if (!button || !text) continue;
+          if (!(text === requested || text.includes(requested) || requested.includes(text))) continue;
+          button.click();
+          return true;
+        }
+        return false;
+      }, taskText).catch(() => false);
+      return clickedByStructuredRow;
     },
 
     async clickGoalCardTaskRemove(goalTitle: string, taskText: string): Promise<boolean> {
@@ -147,14 +251,6 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
         await explicit.click({ timeout: 1500 }).catch(() => undefined);
         return true;
       }
-
-      const buttons = row.locator("button");
-      const count = await buttons.count();
-      if (count >= 2) {
-        await buttons.nth(1).click({ timeout: 1500 }).catch(() => undefined);
-        return true;
-      }
-
       return false;
     },
 
@@ -175,7 +271,13 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
     async openTaskPanel(): Promise<void> {
       const page = deps.pageOrThrow();
       const tabByRole = page.getByRole("button", { name: /^tasks$/i }).first();
+      const editTasksByRole = page.getByRole("button", { name: /^edit tasks$/i }).first();
       const attempts: Array<() => Promise<void>> = [
+        async () => {
+          if ((await editTasksByRole.count()) > 0 && (await editTasksByRole.isVisible().catch(() => false))) {
+            await editTasksByRole.click({ timeout: 2000 }).catch(() => undefined);
+          }
+        },
         async () => {
           if ((await tabByRole.count()) > 0 && (await tabByRole.isVisible().catch(() => false))) {
             await tabByRole.click({ timeout: 2000 }).catch(() => undefined);
@@ -223,34 +325,66 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       return null;
     },
 
+    async openGoalStatusMenu(): Promise<boolean> {
+      const page = deps.pageOrThrow();
+      const statusButton = page.getByRole("button", { name: /Goal status/i }).first();
+      if ((await statusButton.count()) > 0 && (await statusButton.isVisible().catch(() => false))) {
+        await statusButton.click({ timeout: 2000 }).catch(() => undefined);
+      } else {
+        const clicked = await deps.tryClickByText(page, ["GOAL STATUS", "Goal Status"]);
+        if (!clicked) return false;
+      }
+      const menu = page.locator('[role="menu"]').first();
+      await waitForBoolean(
+        page,
+        async () => (await menu.count()) > 0 && (await menu.isVisible().catch(() => false)),
+        1500,
+        "goal status menu did not open"
+      ).catch(() => false);
+      return (await menu.count()) > 0 && (await menu.isVisible().catch(() => false));
+    },
+
     async clickGoalStatusAction(status: "active" | "completed" | "archived"): Promise<boolean> {
       const page = deps.pageOrThrow();
       const actionTexts = textSelectors(selectors.goals.statusActions[status]);
-      const clicked = await deps.tryClickByText(page, actionTexts);
+      const menu = page.locator('[role="menu"]').first();
+      const roleTarget = page.getByRole("menuitem", { name: new RegExp(actionTexts.join("|"), "i") }).first();
+      let clicked = false;
+      if ((await roleTarget.count()) > 0 && (await roleTarget.isVisible().catch(() => false))) {
+        await roleTarget.click({ timeout: 1500 }).catch(() => undefined);
+        clicked = true;
+      }
+      if (!clicked) {
+        clicked = await deps.tryClickByText(page, actionTexts, (await menu.count()) > 0 ? menu : undefined);
+      }
       if (!clicked) return false;
       await deps.tryClickByText(page, ["Confirm", "Done", "Save", "Yes", "YES"]);
       return true;
     },
 
     async openGoalContext(goalTitle: string): Promise<void> {
+      if (await this.isGoalContextOpen(goalTitle)) return;
       await deps.ensureOnGoals();
       const page = deps.pageOrThrow();
+      const filters = [["Active"], ["Complete", "Completed"], ["Archived"], ["All"]] as const;
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const clicked = await this.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
-        if (!clicked) {
-          await deps.tryClickByText(page, ["All"]);
-          const clickedAfterReset = await this.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
-          if (!clickedAfterReset) {
-            await this.tryOpenAnyGoalByLink();
-          }
+        const section = await this.resolveGoalsSection();
+        for (const texts of filters) {
+          await deps.tryClickByText(page, [...texts], section ?? undefined);
+          await this.hydrateGoalsList();
+          const clicked = await this.tryClickGoalCardAction(goalTitle, ["START", "Start", "Open", "View"]);
+          if (clicked && (await this.waitForGoalContext(goalTitle, 2000))) return;
         }
-        if (await this.waitForGoalContext(goalTitle, 2000)) return;
         await page.goto(`${config.SELFMAX_BASE_URL.replace(/\/$/, "")}/goals`, { waitUntil: "domcontentloaded" }).catch(() => undefined);
       }
       throw new Error(`could not open goal context for: ${goalTitle}`);
     },
 
     async openGoalForRead(goalTitle?: string, goalId?: string): Promise<void> {
+      if (goalTitle && (await this.isGoalContextOpen(goalTitle))) {
+        await this.waitForGoalDataLoaded();
+        return;
+      }
       if (goalId) {
         await this.openGoalContextById(goalId);
         if (!(await this.waitForGoalContext(goalTitle, 2500))) {
@@ -275,8 +409,14 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
     async isGoalWorkspaceVisible(): Promise<boolean> {
       const page = deps.pageOrThrow();
       if (!/\/self-maximize(\?|$)/.test(page.url())) return false;
-      const bodyText = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
-      return /Current Goal|GOAL STATUS|Type your message|⌘ \+ Enter to send/i.test(bodyText);
+      const currentGoal = page.getByText(/^Current Goal$/i).first();
+      const goalStatus = page.getByText(/^GOAL STATUS$/i).first();
+      const composer = page.getByPlaceholder(/Type your message/i).first();
+      return (
+        ((await currentGoal.count()) > 0 && (await currentGoal.isVisible().catch(() => false))) ||
+        ((await goalStatus.count()) > 0 && (await goalStatus.isVisible().catch(() => false))) ||
+        ((await composer.count()) > 0 && (await composer.isVisible().catch(() => false)))
+      );
     },
 
     async readBodySnippet(): Promise<string> {
@@ -293,27 +433,50 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       messages: string[];
       snippet: string;
     }> {
-      const text = await deps.pageOrThrow().locator("body").innerText().catch(() => "");
+      const page = deps.pageOrThrow();
+      const text = await page.locator("body").innerText().catch(() => "");
       const snapshot = extractGoalWorkspaceSnapshot(text);
+      const messageTexts = await page.locator(".flex.justify-start .whitespace-pre-wrap, .flex.justify-end .whitespace-pre-wrap")
+        .evaluateAll((nodes) => nodes
+          .map((node) => (node.textContent || "").replace(/\s+/g, " ").trim())
+          .filter((value) => value.length > 0))
+        .catch(() => []);
+      const currentGoalHeading = page.getByText(/^Current Goal$/i).first();
+      let title = snapshot.goalTitle;
+      if ((await currentGoalHeading.count()) > 0) {
+        const directTitle = await currentGoalHeading.locator("xpath=following::*[self::h1 or self::h2 or self::h3 or self::div or self::span][1]").innerText().catch(() => "");
+        if (directTitle.trim()) title = directTitle.trim();
+      }
       return {
-        title: snapshot.goalTitle,
+        title,
         category: snapshot.category,
         dueLabel: snapshot.dueLabel,
         progressLabel: snapshot.progressLabel,
         statusBlocks: snapshot.statusBlocks,
         tabs: snapshot.tabs,
-        messages: snapshot.messages,
+        messages: messageTexts.length > 0 ? messageTexts : snapshot.messages,
         snippet: snapshot.snippet
       };
     },
 
     async waitForGoalDataLoaded(timeoutMs = 2500, page = deps.pageOrThrow()): Promise<void> {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const text = (await page.locator("body").innerText().catch(() => "")).replace(/\s+/g, " ");
-        if (!/Loading\.\.\.|Loading Goal/i.test(text) && /Current Goal|GOAL STATUS|Type your message|⌘ \+ Enter to send/i.test(text)) return;
-        await page.waitForTimeout(250);
-      }
+      await waitForBoolean(
+        page,
+        async () => {
+          const loading = page.getByText(/Loading\.\.\.|Loading Goal/i).first();
+          if ((await loading.count()) > 0 && (await loading.isVisible().catch(() => false))) return false;
+          const currentGoal = page.getByText(/^Current Goal$/i).first();
+          const goalStatus = page.getByText(/^GOAL STATUS$/i).first();
+          const composer = page.getByPlaceholder(/Type your message/i).first();
+          return (
+            ((await currentGoal.count()) > 0 && (await currentGoal.isVisible().catch(() => false))) ||
+            ((await goalStatus.count()) > 0 && (await goalStatus.isVisible().catch(() => false))) ||
+            ((await composer.count()) > 0 && (await composer.isVisible().catch(() => false)))
+          );
+        },
+        timeoutMs,
+        "goal workspace did not finish loading"
+      ).catch(() => undefined);
     },
 
     async waitForTaskPanelData(timeoutMs = 1500, page = deps.pageOrThrow()): Promise<boolean> {
@@ -404,43 +567,74 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       const normalized = normalizeDateInput(dueDateInput);
       if (!normalized) throw new Error(`invalid due date: ${dueDateInput}`);
       await deps.ensureOnGoals();
-      const card = await this.resolveGoalCard(goalTitle);
-      if (!card) return false;
-      const dueNode = card.getByText(/^Due\s/i).first();
-      if ((await dueNode.count()) === 0) return false;
-      await dueNode.click({ timeout: 1500 }).catch(() => undefined);
       const page = deps.pageOrThrow();
-      const deadline = Date.now() + 2500;
-      while (Date.now() < deadline) {
-        const dateInput = page.locator('input[type="date"]').filter({ hasNotText: "Type your message" }).first();
-        if ((await dateInput.count()) > 0 && (await dateInput.isVisible().catch(() => false))) {
-          await dateInput.fill(normalized);
-          await dateInput.press("Enter").catch(() => undefined);
-          await page.keyboard.press("Tab").catch(() => undefined);
-          const expectedLabel = this.formatGoalDueLabel(normalized);
-          if (!expectedLabel) return true;
-          const updated = await this.waitForGoalDueLabel(goalTitle, expectedLabel, 2500);
-          return updated;
+      for (const filterTexts of [["Active"], ["Complete", "Completed"], ["Archived"], ["All"]] as const) {
+        const section = await this.resolveGoalsSection();
+        await deps.tryClickByText(page, [...filterTexts], section ?? undefined);
+        await this.hydrateGoalsList();
+        let card = await this.resolveGoalCard(goalTitle);
+        if (!card) continue;
+        let clicked = false;
+        for (const selector of cssSelectors(selectors.goals.dueDateEditTargets)) {
+          const target = card.locator(selector).first();
+          if ((await target.count()) === 0) continue;
+          if (!(await target.isVisible().catch(() => false))) continue;
+          await target.click({ timeout: 1500 }).catch(() => undefined);
+          clicked = true;
+          break;
         }
-        await page.waitForTimeout(200);
+        if (!clicked) {
+          let dueNode = card.getByText(/^Due\s/i).first();
+          if ((await dueNode.count()) === 0) {
+            dueNode = card.locator('[title*="edit due date" i] span').filter({ hasText: /^Due\s/i }).first();
+          }
+          if ((await dueNode.count()) === 0) continue;
+          await dueNode.click({ timeout: 1500 }).catch(() => undefined);
+        }
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline) {
+          const dateInput = page.locator('input[type="date"]').filter({ hasNotText: "Type your message" }).first();
+          if ((await dateInput.count()) > 0 && (await dateInput.isVisible().catch(() => false))) {
+            await dateInput.fill(normalized);
+            await dateInput.press("Enter").catch(() => undefined);
+            await page.keyboard.press("Tab").catch(() => undefined);
+            const expectedLabel = this.formatGoalDueLabel(normalized);
+            if (!expectedLabel) return true;
+            const updated = await this.waitForGoalDueLabel(goalTitle, expectedLabel, 2500);
+            return updated;
+          }
+          await page.waitForTimeout(200);
+        }
       }
       return false;
     },
 
     async waitForGoalDueLabel(goalTitle: string, expectedLabel: string, timeoutMs = 2500): Promise<boolean> {
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const card = await this.resolveGoalCard(goalTitle);
-        const text = ((await card?.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
-        if (text.includes(expectedLabel)) return true;
-        await deps.pageOrThrow().waitForTimeout(200);
+      try {
+        await waitForTruthy(
+          deps.pageOrThrow(),
+          async () => {
+            const card = await this.resolveGoalCard(goalTitle);
+            return ((await card?.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+          },
+          (text) => text.includes(expectedLabel),
+          timeoutMs,
+          `goal due label did not update for ${goalTitle}`
+        );
+        return true;
+      } catch {
+        return false;
       }
-      return false;
     },
 
     async resolveTaskInput(): Promise<Locator> {
       const taskPanel = await this.resolveTaskPanel();
       if (!taskPanel) throw new Error("could not locate goal task panel");
+
+      for (const selector of cssSelectors(selectors.tasks.manualInput)) {
+        const exact = taskPanel.locator(selector).first();
+        if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) return exact;
+      }
 
       const byPlaceholder = taskPanel.locator('input[placeholder*="Add" i], textarea[placeholder*="Add" i], input[placeholder*="task" i], textarea[placeholder*="task" i]').first();
       if ((await byPlaceholder.count()) > 0 && (await byPlaceholder.isVisible().catch(() => false))) return byPlaceholder;
@@ -464,6 +658,22 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       }
 
       throw new Error("could not locate task input");
+    },
+
+    async submitTaskInput(field: Locator): Promise<void> {
+      const taskPanel = await this.resolveTaskPanel();
+      if (!taskPanel) throw new Error("could not locate goal task panel");
+
+      for (const selector of cssSelectors(selectors.tasks.manualSubmit)) {
+        const button = taskPanel.locator(selector).first();
+        if ((await button.count()) === 0) continue;
+        const disabled = await button.isDisabled().catch(() => false);
+        if (disabled) continue;
+        await button.click({ timeout: 1500 }).catch(() => undefined);
+        return;
+      }
+
+      await field.press("Enter").catch(() => undefined);
     },
 
     async ensureTaskPanelVisible(): Promise<void> {
@@ -494,12 +704,15 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
     async resolveTaskPanel(): Promise<Locator | null> {
       const page = deps.pageOrThrow();
-      const candidates = [
+      const candidates: Locator[] = [
         page.getByText(/How will you accomplish/i).first(),
         page.getByText(/Select Tasks/i).first(),
         page.getByText(/Add new task/i).first(),
         page.getByText(/Use the task suggestion tool/i).first()
       ];
+      for (const selector of cssSelectors(selectors.tasks.manualInput)) {
+        candidates.push(page.locator(selector).first());
+      }
       for (const anchor of candidates) {
         if ((await anchor.count()) === 0) continue;
         let best: Locator | null = null;
@@ -536,13 +749,30 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
       if (!panel) return null;
       const normalized = normalizeTaskText(taskText);
 
+      const findBestAncestorRow = async (anchor: Locator): Promise<Locator | null> => {
+        for (let depth = 1; depth <= 6; depth += 1) {
+          const candidate = anchor.locator(`xpath=ancestor::*[self::li or self::div or self::article or self::section][${depth}]`);
+          if ((await candidate.count()) === 0) continue;
+          const text = normalizeTaskText(await candidate.innerText().catch(() => ""));
+          if (!text) continue;
+          if (!(text === normalized || text.includes(normalized) || normalized.includes(text))) continue;
+          const buttons = candidate.locator('button, input[type="checkbox"], [role="checkbox"]');
+          if ((await buttons.count()) > 0) return candidate;
+        }
+        return null;
+      };
+
       const exactText = panel.getByText(taskText, { exact: true }).first();
       if ((await exactText.count()) > 0) {
+        const row = await findBestAncestorRow(exactText);
+        if (row) return row;
         return exactText.locator("xpath=ancestor::*[self::li or self::div or self::article or self::section][1]");
       }
 
       const exactRow = panel.locator("li, article, section, div").filter({ hasText: taskText }).first();
       if ((await exactRow.count()) > 0) {
+        const row = await findBestAncestorRow(exactRow);
+        if (row) return row;
         return exactRow;
       }
 
@@ -553,6 +783,8 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
         const text = normalizeTaskText(await row.innerText().catch(() => ""));
         if (!text) continue;
         if (text === normalized || text.includes(normalized) || normalized.includes(text)) {
+          const buttons = row.locator('button, input[type="checkbox"], [role="checkbox"]');
+          if ((await buttons.count()) > 0) return row;
           return row;
         }
       }
@@ -571,6 +803,11 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
     },
 
     async readVisibleTaskItems(): Promise<TaskItem[]> {
+      const panel = await this.resolveTaskPanel();
+      if (panel) {
+        const panelTasks = await readTaskItemsFromDom(panel);
+        if (panelTasks.length > 0) return panelTasks;
+      }
       const page = deps.pageOrThrow();
       const text = await page.locator("body").innerText().catch(() => "");
       return extractTaskItemsFromGoalPage(text);
@@ -578,47 +815,65 @@ export function createGoalsSupport(deps: GoalsSupportDeps) {
 
     async waitForTaskToAppear(taskText: string, timeoutMs = 2500): Promise<TaskItem | null> {
       const normalized = normalizeTaskText(taskText);
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const tasks = await this.readVisibleTaskItems();
-        const match = tasks.find((task) => {
-          const candidate = normalizeTaskText(task.text);
-          return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
-        });
-        if (match) return match;
-        await deps.pageOrThrow().waitForTimeout(200);
+      try {
+        return await waitForTruthy(
+          deps.pageOrThrow(),
+          async () => {
+            const tasks = await this.readVisibleTaskItems();
+            return tasks.find((task) => {
+              const candidate = normalizeTaskText(task.text);
+              return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
+            }) ?? null;
+          },
+          (match) => Boolean(match),
+          timeoutMs,
+          `task did not appear: ${taskText}`
+        );
+      } catch {
+        return null;
       }
-      return null;
     },
 
     async waitForTaskState(taskText: string, completed: boolean, timeoutMs = 2500): Promise<TaskItem | null> {
       const normalized = normalizeTaskText(taskText);
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const tasks = await this.readVisibleTaskItems();
-        const match = tasks.find((task) => {
-          const candidate = normalizeTaskText(task.text);
-          return (candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate)) && task.completed === completed;
-        });
-        if (match) return match;
-        await deps.pageOrThrow().waitForTimeout(200);
+      try {
+        return await waitForTruthy(
+          deps.pageOrThrow(),
+          async () => {
+            const tasks = await this.readVisibleTaskItems();
+            return tasks.find((task) => {
+              const candidate = normalizeTaskText(task.text);
+              return (candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate)) && task.completed === completed;
+            }) ?? null;
+          },
+          (match) => Boolean(match),
+          timeoutMs,
+          `task did not reach expected state (${completed ? "completed" : "pending"}): ${taskText}`
+        );
+      } catch {
+        return null;
       }
-      return null;
     },
 
     async waitForTaskToDisappear(taskText: string, timeoutMs = 2500): Promise<boolean> {
       const normalized = normalizeTaskText(taskText);
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        const tasks = await this.readVisibleTaskItems();
-        const stillPresent = tasks.some((task) => {
-          const candidate = normalizeTaskText(task.text);
-          return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
-        });
-        if (!stillPresent) return true;
-        await deps.pageOrThrow().waitForTimeout(200);
+      try {
+        await waitForBoolean(
+          deps.pageOrThrow(),
+          async () => {
+            const tasks = await this.readVisibleTaskItems();
+            return !tasks.some((task) => {
+              const candidate = normalizeTaskText(task.text);
+              return candidate === normalized || candidate.includes(normalized) || normalized.includes(candidate);
+            });
+          },
+          timeoutMs,
+          `task did not disappear: ${taskText}`
+        );
+        return true;
+      } catch {
+        return false;
       }
-      return false;
     },
 
     async clickGoalCardAction(goalTitle: string, actionTexts: string[]): Promise<void> {

@@ -155,9 +155,6 @@ export function extractLifestormingOverview(text: string): {
   const lines = splitVisibleLines(text);
   const stepTexts = lines.filter((line) => /^STEP\s+\d+:|^Step\s+\d+:|^LIFESTORMING$|^BRAINSTORM$|^YOUR LIFE$/i.test(line)).slice(0, 16);
 
-  const instructionalNoise = /SELF-IMPROVE|SELF-AWARENESS|COMMUNITY|Help|More|LIFESTORMING|BRAINSTORM|YOUR LIFE|STEP \d+:|GO|VIEW|ADD TO GOALS|Now that you have a list of DESIRES|How would it feel\?|Spend a few minutes on your DESIRES|Or, you can delete it|Now you know how you feel!/i;
-  const visibleDesires = lines.filter((line) => line.length > 2 && !instructionalNoise.test(line)).slice(0, 20);
-
   const extractSectionItems = (headingPattern: RegExp, stopPattern: RegExp): string[] => {
     const start = lines.findIndex((line) => headingPattern.test(line));
     if (start === -1) return [];
@@ -178,12 +175,16 @@ export function extractLifestormingOverview(text: string): {
     return [...new Set(items)];
   };
 
+  const feelItOutItems = extractSectionItems(/^STEP 2:\s*FEEL IT OUT$/i, /^STEP 3:\s*START A GOAL$/i);
+  const startGoalItems = extractSectionItems(/^STEP 3:\s*START A GOAL$/i, /^Self-Max is an AI-driven/i);
+  const visibleDesires = [...new Set([...feelItOutItems, ...startGoalItems])];
+
   return {
     stepTexts,
     visibleDesires,
     desiresBySection: [
-      { section: "feel_it_out", items: extractSectionItems(/^STEP 2:\s*FEEL IT OUT$/i, /^STEP 3:\s*START A GOAL$/i) },
-      { section: "start_a_goal", items: extractSectionItems(/^STEP 3:\s*START A GOAL$/i, /^Self-Max is an AI-driven/i) }
+      { section: "feel_it_out", items: feelItOutItems },
+      { section: "start_a_goal", items: startGoalItems }
     ],
     snippet: normalizeWhitespace(text).slice(0, 800)
   };

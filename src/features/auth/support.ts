@@ -4,6 +4,7 @@ import type { BrowserContext, Locator, Page } from "playwright";
 import { config } from "../../core/config.js";
 import { textSelectors, selectors } from "../../platform/selectors.js";
 import { AuthError } from "../../core/recovery.js";
+import { waitForBoolean } from "../../core/postconditions.js";
 import { resolveFirstVisible } from "../../platform/navigation.js";
 import type { SessionContext } from "../../core/types.js";
 
@@ -65,18 +66,24 @@ export function createAuthSupport(deps: AuthSupportDeps) {
 
       const activeCount = await this.readGoalCount("Active");
       const archivedCount = await this.readGoalCount("Archived");
-      if (activeCount !== null || archivedCount !== null) return true;
-      return false;
+      const completeCount = await this.readGoalCount("Complete");
+      const allCount = await this.readGoalCount("All");
+      const counts = [activeCount, archivedCount, completeCount, allCount].filter((value): value is number => value !== null);
+      if (counts.length === 0) return false;
+      if (config.SELFMAX_AUTH_MIN_ARCHIVED > 0) {
+        return (archivedCount ?? 0) >= config.SELFMAX_AUTH_MIN_ARCHIVED;
+      }
+      return counts.some((value) => value > 0);
     },
 
     async waitForGoalsWorkspaceVisible(timeoutMs = 4000): Promise<boolean> {
       const page = deps.pageOrThrow();
-      const deadline = Date.now() + timeoutMs;
-      while (Date.now() < deadline) {
-        if (await this.isGoalsWorkspaceVisible()) return true;
-        await page.waitForTimeout(500);
+      try {
+        await waitForBoolean(page, () => this.isGoalsWorkspaceVisible(), timeoutMs, "goals workspace did not become visible", 500);
+        return true;
+      } catch {
+        return false;
       }
-      return false;
     },
 
     async ensureGoalsWorkspaceVisible(): Promise<void> {

@@ -790,8 +790,10 @@ async function ensureLoggedIn(client, session) {
 }
 
 async function runClientMode(args) {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
+  const { PublicApi } = await import("../dist/api/index.js");
   const client = new SelfMaxPlaywrightClient();
+  const publicApi = new PublicApi(client);
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
 
   const goalTitle = args.goalTitle ?? `MVP Automation Goal ${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -811,6 +813,46 @@ async function runClientMode(args) {
       const login = await client.execute({ id: "login", name: "login" }, session);
       const read = await client.execute({ id: "read", name: "read_coach_messages" }, session);
       console.log(JSON.stringify({ login: summarize(login), read: summarize(read) }));
+      return;
+    }
+
+    if (args.mode === "read-coach-messages") {
+      await ensureLoggedIn(client, session);
+      const read = await client.execute({ id: "read-coach-messages", name: "read_coach_messages" }, session);
+      console.log(JSON.stringify(summarize(read)));
+      return;
+    }
+
+    if (args.mode === "api") {
+      await ensureLoggedIn(client, session);
+      if (!args.name) throw new Error("api mode requires --name");
+      const payload = args.payloadJson?.trim() ? JSON.parse(args.payloadJson) : {};
+      const res = await publicApi.execute({ id: "api", name: args.name, payload }, session);
+      console.log(JSON.stringify(summarize(res)));
+      return;
+    }
+
+    if (args.mode === "public-reads") {
+      await ensureLoggedIn(client, session);
+      const results = [];
+      const getActions = await publicApi.execute({ id: "1", name: "get_actions", payload: {} }, session);
+      results.push({ step: "get_actions", ...summarize(getActions) });
+      const getGoals = await publicApi.execute({ id: "2", name: "get_goals", payload: { status: "active", deep: false } }, session);
+      results.push({ step: "get_goals", ...summarize(getGoals) });
+      const getDesires = await publicApi.execute({ id: "3", name: "get_desires", payload: { deep: false } }, session);
+      results.push({ step: "get_desires", ...summarize(getDesires) });
+      const firstGoalTitle = getGoals.result?.goals?.find?.((goal) => typeof goal?.title === "string" && goal.title.trim().length > 0)?.title;
+      const firstDesireTitle = getDesires.result?.desires?.find?.((desire) => typeof desire?.title === "string" && desire.title.trim().length > 0)?.title;
+      if (firstGoalTitle) {
+        results.push({ step: "get_goal", ...summarize(await publicApi.execute({ id: "4", name: "get_goal", payload: { goalTitle: firstGoalTitle, depth: 0 } }, session)) });
+        results.push({ step: "get_goal_tasks", ...summarize(await publicApi.execute({ id: "5", name: "get_goal_tasks", payload: { goalTitle: firstGoalTitle } }, session)) });
+        results.push({ step: "get_goal_chat", ...summarize(await publicApi.execute({ id: "6", name: "get_goal_chat", payload: { goalTitle: firstGoalTitle, depth: 0 } }, session)) });
+      }
+      if (firstDesireTitle) {
+        results.push({ step: "get_desire", ...summarize(await publicApi.execute({ id: "7", name: "get_desire", payload: { desireTitle: firstDesireTitle } }, session)) });
+      }
+      results.push({ step: "get_state", ...summarize(await publicApi.execute({ id: "8", name: "get_state", payload: { includeArchived: false } }, session)) });
+      for (const row of results) console.log(JSON.stringify(row));
       return;
     }
 
@@ -946,12 +988,14 @@ async function runClientMode(args) {
     }
 
     if (args.mode === "read-cached-goals") {
+      await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "read-cached-goals", name: "list_goals", payload: { filter: "all" } }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
     }
 
     if (args.mode === "read-cached-desires") {
+      await ensureLoggedIn(client, session);
       const res = await client.execute({ id: "read-cached-desires", name: "read_cached_desires" }, session);
       console.log(JSON.stringify(summarize(res)));
       return;
@@ -1464,8 +1508,10 @@ async function runClientMode(args) {
 }
 
 async function runKeepOpenMode(args) {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
+  const { PublicApi } = await import("../dist/api/index.js");
   const client = new SelfMaxPlaywrightClient();
+  const publicApi = new PublicApi(client);
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const goalTitleBase = args.goalTitle ?? "MVP Automation Goal";
   const taskBase = args.task ?? "MVP task";
@@ -1488,6 +1534,7 @@ async function runKeepOpenMode(args) {
         "commands:",
         "  sequence                     run MVP sequence without re-login",
         "  primitive <name> <json>      run one primitive with JSON payload",
+        "  api <name> <json>            run one public API request with JSON payload",
         "  inspect-card <goal title>    inspect /goals card DOM for a goal",
         "  inspect-task <goal> | <task> inspect task DOM on /self-maximize",
         "  examples: read_goals_overview, read_goal_full, read_page_sections, discover_links",
@@ -1561,6 +1608,23 @@ async function runKeepOpenMode(args) {
         console.log(JSON.stringify({ step: name, ...summarize(res) }));
         continue;
       }
+      if (line.toLowerCase().startsWith("api ")) {
+        const raw = line.slice("api ".length).trim();
+        const firstSpace = raw.indexOf(" ");
+        const name = firstSpace === -1 ? raw : raw.slice(0, firstSpace);
+        const payloadRaw = firstSpace === -1 ? "{}" : raw.slice(firstSpace + 1);
+        let payload;
+        try {
+          payload = JSON.parse(payloadRaw);
+        } catch (error) {
+          console.log(JSON.stringify({ ok: false, error: `invalid json payload: ${String(error)}` }));
+          continue;
+        }
+        const req = { id: `${Date.now()}`, name, payload };
+        const res = await publicApi.execute(req, session);
+        console.log(JSON.stringify({ step: name, ...summarize(res) }));
+        continue;
+      }
 
       console.log(JSON.stringify({ ok: false, error: "unknown command" }));
     }
@@ -1571,7 +1635,7 @@ async function runKeepOpenMode(args) {
 }
 
 async function runSigninDiagnostic() {
-  const { config } = await import("../dist/config.js");
+  const { config } = await import("../dist/core/config.js");
 
   const browser = await chromium.launch({ headless: config.HEADLESS });
   const page = await browser.newPage();
@@ -1628,7 +1692,7 @@ async function runSigninDiagnostic() {
 }
 
 async function runGoalsInspect() {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   try {
@@ -1671,7 +1735,7 @@ async function runGoalsInspect() {
 }
 
 async function runCreateGoalInspect() {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   try {
@@ -1753,7 +1817,7 @@ async function runCreateGoalInspect() {
 }
 
 async function runCreateGoalPrimitiveInspect(args) {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const goalTitle = args.goalTitle ?? `MVP Automation Goal ${new Date().toISOString().replace(/[:.]/g, "-")}`;
@@ -1808,7 +1872,7 @@ async function runCreateGoalPrimitiveInspect(args) {
 }
 
 async function runUpdateGoalDueDate(args) {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const dueDate = args.dueDate ?? nextIsoDate(14);
@@ -1833,7 +1897,7 @@ async function runUpdateGoalDueDate(args) {
 }
 
 async function runPrimitiveOnce(args) {
-  const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+  const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
   const client = new SelfMaxPlaywrightClient();
   const session = { sessionId: "smoke-session", userId: "smoke-user" };
   const primitiveName = args.name ?? "";
@@ -1922,6 +1986,9 @@ async function main() {
         "Modes:",
         "  login              Run login primitive only",
         "  probe              Run login + read_coach_messages probe",
+        "  api                Run one public API request once with explicit JSON payload",
+        "  public-reads       Run non-mutating public API sweep",
+        "  read-coach-messages Read guide chat messages from /goals",
         "  sequence           Run full MVP smoke sequence",
         "  open-goal-internal-by-id Open a goal by goalId using the private runtime",
         "  set-goal-archived  Set a goal status to archived by goalTitle",
@@ -1990,7 +2057,7 @@ async function main() {
   }
 
   if (args.mode === "goals-list") {
-    const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+    const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
     const client = new SelfMaxPlaywrightClient();
     const session = { sessionId: "smoke-session", userId: "smoke-user" };
     try {
@@ -2038,7 +2105,7 @@ async function main() {
   }
 
   if (args.mode === "task-inspect") {
-    const { SelfMaxPlaywrightClient } = await import("../dist/selfmaxClient.js");
+    const { SelfMaxPlaywrightClient } = await import("../dist/client/selfmaxClient.js");
     const client = new SelfMaxPlaywrightClient();
     const session = { sessionId: "smoke-session", userId: "smoke-user" };
     const goalTitle = args.goalTitle ?? "MVP Automation Goal";
